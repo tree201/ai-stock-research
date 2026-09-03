@@ -1,5 +1,5 @@
-from datetime import date, datetime, timezone
 import os
+from datetime import date, datetime, timezone
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
@@ -7,6 +7,7 @@ from uuid import UUID
 
 from stock_research.documents import FetchedDocument
 from stock_research.llm import HeuristicLLMProvider, ModelNotConfiguredError
+from stock_research.market_data import PriceBar
 from stock_research.web import _research_documents, _web_provider, chat_entry_payload, chat_payload, history_payload, provider_status, run_research_payload
 from stock_research.jobs import InlineQueue, create_and_enqueue, execute_research_job
 from stock_research.storage import SQLiteStore
@@ -280,3 +281,72 @@ class WebMvpTests(unittest.TestCase):
             companies = history_payload("/api/companies")
             self.assertEqual(len(companies), 1)
             self.assertEqual(companies[0]["session_count"], 1)
+
+    def test_company_panel_returns_project_documents_and_reports(self) -> None:
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
+            clear=False,
+        ):
+            run_research_payload({
+                "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
+                "document": "Revenue FY2024 HK$ 100 million",
+            }, db_path=f"{directory}/research.sqlite3")
+            panel = history_payload("/api/company-panel?symbol=00700&market=HK")
+            self.assertTrue(panel["available"])
+            self.assertEqual(panel["project"]["symbol"], "00700")
+            self.assertGreaterEqual(len(panel["documents"]), 1)
+            self.assertGreaterEqual(len(panel["reports"]), 1)
+            self.assertTrue(panel["reports"][0]["id"])
+
+    def test_quote_endpoint_returns_delayed_snapshot(self) -> None:
+        now = datetime.now(timezone.utc)
+        bars = [
+            PriceBar("0700.HK", date(2026, 9, 1), 100.0, 110.0, 99.0, 105.0, 1000, "yahoo_chart", now),
+            PriceBar("0700.HK", date(2026, 9, 2), 105.0, 112.0, 104.0, 110.0, 1200, "yahoo_chart", now),
+        ]
+
+        class FakeProvider:
+            def __init__(self):
+                self.symbol = ""
+
+            def get_daily_bars(self, symbol, start, end):
+                self.symbol = symbol
+                return bars
+
+        fake = FakeProvider()
+        with patch("stock_research.web.YahooFinanceProvider", return_value=fake):
+            quote = history_payload("/api/quote/00700?market=HK")
+        self.assertTrue(quote["available"])
+        self.assertEqual(fake.symbol, "0700.HK")
+        self.assertEqual(quote["last"], 110.0)
+        self.assertEqual(quote["change"], 5.0)
+        self.assertEqual(quote["high_52w"], 112.0)
+        self.assertTrue(quote["delayed"])
+
+    def test_quote_endpoint_degrades_without_provider(self) -> None:
+        from stock_research.market_data import MarketDataError
+
+        class FailingProvider:
+            def get_daily_bars(self, symbol, start, end):
+                raise MarketDataError("down")
+
+        with patch("stock_research.web.YahooFinanceProvider", FailingProvider):
+            quote = history_payload("/api/quote/00700?market=HK")
+        self.assertFalse(quote["available"])
+        self.assertTrue(quote["delayed"])
+
+    def test_news_endpoint_uses_keyless_search(self) -> None:
+        class FakeNews:
+            def __init__(self):
+                self.query = ""
+
+            def search(self, query, max_results=5):
+                self.query = query
+                return [SearchResult(title="t", url="https://example.com", snippet="s")]
+
+        fake = FakeNews()
+        with patch("stock_research.web.GoogleNewsSearch", return_value=fake):
+            news = history_payload("/api/news?name=CKH%20HOLDINGS&symbol=00001")
+        self.assertEqual(news[0]["url"], "https://example.com")
+        self.assertEqual(fake.query, "CKH HOLDINGS 最新")

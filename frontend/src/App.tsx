@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { Button, Select } from "antd";
+import { Button, Badge, Modal, Select, Tabs } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -20,9 +20,12 @@ import {
   api,
   Company,
   CompanyCatalogEntry,
+  CompanyPanel,
   Job,
   Message,
   ModelSettings,
+  NewsItem,
+  Quote,
   Report,
   Run,
   SearchResult,
@@ -334,8 +337,21 @@ export default function App() {
   );
   const [companyName, setCompanyName] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
-  const [pendingReports, setPendingReports] = useState<Report[]>([]);
-  const [reportPanelOpen, setReportPanelOpen] = useState(true);
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [panelTab, setPanelTab] = useState("overview");
+  const [panelCompany, setPanelCompany] = useState<{
+    name: string;
+    symbol: string;
+    market: string;
+  } | null>(null);
+  const [panelData, setPanelData] = useState<CompanyPanel | null>(null);
+  const [panelQuote, setPanelQuote] = useState<Quote | null>(null);
+  const [panelLoading, setPanelLoading] = useState(false);
+  const [newsItems, setNewsItems] = useState<NewsItem[] | null>(null);
+  const [newsLoading, setNewsLoading] = useState(false);
+  const [newReportBadge, setNewReportBadge] = useState(false);
+  const [reportViewer, setReportViewer] = useState<Report | null>(null);
+  const [reportLoadingId, setReportLoadingId] = useState<string | null>(null);
   const [pendingJob, setPendingJob] = useState<Job | null>(null);
   const [progressRun, setProgressRun] = useState<Run | undefined>();
   const [input, setInput] = useState("");
@@ -494,6 +510,33 @@ export default function App() {
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [searchOpen, searchQuery, companies]);
 
+  useEffect(() => {
+    if (!panelOpen || !panelCompany) return;
+    void loadPanel(panelCompany);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panelOpen, panelCompany?.symbol, panelCompany?.market]);
+
+  useEffect(() => {
+    if (!panelOpen || panelTab !== "news" || !panelCompany || newsItems) return;
+    let cancelled = false;
+    setNewsLoading(true);
+    api
+      .news(panelCompany.name, panelCompany.symbol)
+      .then((items) => {
+        if (!cancelled) setNewsItems(items);
+      })
+      .catch(() => {
+        if (!cancelled) setNewsItems([]);
+      })
+      .finally(() => {
+        if (!cancelled) setNewsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panelOpen, panelTab, panelCompany, newsItems]);
+
   async function fetchCompanySessions(company: Company) {
     const projectIds = company.project_ids?.length
       ? company.project_ids
@@ -513,6 +556,42 @@ export default function App() {
     return sessions;
   }
 
+  async function loadPanel(
+    company: { name: string; symbol: string; market: string } | null,
+  ) {
+    if (!company) {
+      setPanelData(null);
+      setPanelQuote(null);
+      return;
+    }
+    setPanelLoading(true);
+    try {
+      const [panel, quote] = await Promise.all([
+        api.companyPanel(company.symbol, company.market),
+        api.quote(company.symbol, company.market).catch(() => null),
+      ]);
+      setPanelData(panel);
+      setPanelQuote(quote);
+    } catch {
+      setPanelData(null);
+      setPanelQuote(null);
+    } finally {
+      setPanelLoading(false);
+    }
+  }
+
+  async function openReport(reportId: string) {
+    setReportLoadingId(reportId);
+    try {
+      const report = await api.report(reportId);
+      setReportViewer(report);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "报告加载失败");
+    } finally {
+      setReportLoadingId(null);
+    }
+  }
+
   async function openSession(
     session: Session,
     companyNameValue: string,
@@ -521,26 +600,14 @@ export default function App() {
     setError("");
     setCompanyName(companyNameValue);
     if (companyKey) setSelectedCompanyKey(companyKey);
+    const [market, symbol] = (companyKey || "").split(":");
+    if (market && symbol) {
+      setPanelCompany({ name: companyNameValue, symbol, market });
+      setNewReportBadge(false);
+    }
     const detail = await api.session(session.id);
     setSessionId(detail.session.id);
     setMessages(cleanMessages(detail.messages));
-    setPendingReports([]);
-    setReportPanelOpen(false);
-    const reportIds = detail.messages
-      .filter(
-        (message) =>
-          message.message_type === "report_card" && message.content.report_id,
-      )
-      .map((message) => message.content.report_id as string);
-    const latestReportId = reportIds.at(-1);
-    if (latestReportId) {
-      try {
-        setPendingReports([await api.report(latestReportId)]);
-        setReportPanelOpen(true);
-      } catch {
-        /* stale report references are ignored */
-      }
-    }
     const activeJob = (detail.jobs || []).find(
       (job) => job.status === "queued" || job.status === "running",
     );
@@ -559,7 +626,7 @@ export default function App() {
     if (!sessions.length) return;
     const active =
       sessions.find((session) => session.status === "active") || sessions[0];
-    await openSession(active, company.name);
+    await openSession(active, company.name, key);
   }
 
   async function toggleCompany(company: Company) {
@@ -582,16 +649,9 @@ export default function App() {
         if (stopped) return;
         setProgressRun(activeRun(detail.runs));
         if (job.status === "completed" && job.run_id) {
-          const run = await api.run(job.run_id);
-          const reportRef = run.artifacts?.reports?.at(-1);
-          if (reportRef?.id) {
-            const report = await api.report(reportRef.id);
-            if (!stopped)
-              setPendingReports((prev) =>
-                prev.some((item) => item.report_id === report.report_id)
-                  ? prev
-                  : [...prev, report],
-              );
+          if (!stopped) {
+            setNewReportBadge(true);
+            if (panelCompany) void loadPanel(panelCompany);
           }
           if (!stopped) {
             setPendingJob(null);
@@ -687,8 +747,8 @@ export default function App() {
           },
         ]);
       if (result.report) {
-        setPendingReports((prev) => [...prev, result.report!]);
-        setReportPanelOpen(true);
+        setNewReportBadge(true);
+        if (panelCompany) void loadPanel(panelCompany);
       }
       if (result.type === "research_queued" && result.job_id) {
         setPendingJob({
@@ -794,15 +854,19 @@ export default function App() {
         <header className="topbar">
           <h1>{companyName || "开始一段研究"}</h1>
           <div className="topbar-actions">
-            {pendingReports.length > 0 && (
-              <button
-                className="topbar-button report-toggle"
-                onClick={() => setReportPanelOpen((value) => !value)}
-              >
-                <FileText size={14} />{" "}
-                {reportPanelOpen ? "收起报告" : "查看报告"}
-              </button>
-            )}
+            <button
+              className="topbar-button panel-toggle"
+              onClick={() => {
+                setPanelOpen((value) => !value);
+                setNewReportBadge(false);
+              }}
+            >
+              <Badge dot={newReportBadge} color="#c2410c" offset={[-3, 3]}>
+                <span className="panel-toggle-inner">
+                  <FileText size={14} /> 公司档案
+                </span>
+              </Badge>
+            </button>
           </div>
         </header>
         <div className="thread-scroll">
@@ -857,8 +921,7 @@ export default function App() {
           className="composer-wrap"
           style={{
             left: sidebarCollapsed ? 62 : undefined,
-            right:
-              reportPanelOpen && pendingReports.length > 0 ? 380 : undefined,
+            right: panelOpen ? 380 : undefined,
           }}
         >
           {error && (
@@ -886,29 +949,221 @@ export default function App() {
           </form>
         </div>
       </main>
-      {reportPanelOpen && pendingReports.length > 0 && (
-        <aside className="report-panel">
+      {panelOpen && (
+        <aside className="company-panel">
           <div className="report-panel-heading">
             <div>
-              <strong>研究报告</strong>
-              <small>{pendingReports.at(-1)?.company.name} · 最新版本</small>
+              <strong>{panelCompany?.name || companyName || "公司档案"}</strong>
+              <small>
+                {panelCompany
+                  ? `${panelCompany.symbol} · ${panelCompany.market}`
+                  : "选择公司后展示档案"}
+              </small>
             </div>
-            <button
-              onClick={() => setReportPanelOpen(false)}
-              aria-label="收起报告"
-            >
+            <button onClick={() => setPanelOpen(false)} aria-label="收起档案">
               <ChevronRight size={16} />
             </button>
           </div>
-          <div className="report-panel-scroll">
-            <div className="report-panel-content">
-              {pendingReports.slice(-1).map((report) => (
-                <ReportCard report={report} key={report.report_id} />
-              ))}
-            </div>
+          <div className="company-panel-body">
+            <Tabs
+              activeKey={panelTab}
+              onChange={(key) => setPanelTab(key)}
+              size="small"
+              items={[
+                {
+                  key: "overview",
+                  label: "概览",
+                  children: (
+                    <div className="panel-section">
+                      <div className="quote-card">
+                        {panelQuote?.available ? (
+                          <>
+                            <div className="quote-row">
+                              <strong className="quote-last">
+                                {panelQuote.last?.toLocaleString()}
+                              </strong>
+                              <span
+                                className={`quote-change ${
+                                  (panelQuote.change ?? 0) >= 0 ? "up" : "down"
+                                }`}
+                              >
+                                {panelQuote.change != null
+                                  ? `${panelQuote.change >= 0 ? "+" : ""}${panelQuote.change}`
+                                  : "-"}
+                                {panelQuote.change_pct != null
+                                  ? ` (${panelQuote.change_pct >= 0 ? "+" : ""}${(panelQuote.change_pct * 100).toFixed(2)}%)`
+                                  : ""}
+                              </span>
+                            </div>
+                            <div className="quote-meta">
+                              <span>
+                                52周 {panelQuote.low_52w?.toLocaleString()} ~{" "}
+                                {panelQuote.high_52w?.toLocaleString()}{" "}
+                                {panelQuote.currency}
+                              </span>
+                              <span>截至 {panelQuote.as_of}</span>
+                            </div>
+                            <div className="quote-note">
+                              延迟行情（Yahoo 原型数据，仅供参考）
+                            </div>
+                          </>
+                        ) : (
+                          <div className="panel-empty">行情快照暂不可用</div>
+                        )}
+                      </div>
+                      <div className="panel-kv">
+                        <span>公司</span>
+                        <strong>{panelCompany?.name || "-"}</strong>
+                        <span>代码</span>
+                        <strong>
+                          {panelCompany
+                            ? `${panelCompany.symbol} · ${panelCompany.market}`
+                            : "-"}
+                        </strong>
+                        <span>资料</span>
+                        <strong>{panelData?.documents?.length ?? "-"} 份</strong>
+                        <span>报告</span>
+                        <strong>{panelData?.reports?.length ?? "-"} 份</strong>
+                      </div>
+                    </div>
+                  ),
+                },
+                {
+                  key: "sources",
+                  label: `资料${panelData?.documents?.length ? ` (${panelData.documents.length})` : ""}`,
+                  children: (
+                    <div className="panel-section">
+                      <div className="panel-subtitle">已归档资料</div>
+                      {(panelData?.documents?.length ?? 0) > 0 ? (
+                        panelData!.documents!.map((doc) => (
+                          <a
+                            className="doc-item"
+                            key={doc.id}
+                            href={doc.source_url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <FileText size={13} />
+                            <span className="doc-title">{doc.title}</span>
+                            <small>
+                              {doc.published_at
+                                ? doc.published_at.slice(0, 10)
+                                : ""}
+                            </small>
+                          </a>
+                        ))
+                      ) : (
+                        <div className="panel-empty">
+                          暂无归档资料。添加 URL 后发起一次研究即可沉淀。
+                        </div>
+                      )}
+                      <div className="panel-subtitle">研究设置</div>
+                      <label className="panel-field">
+                        <span>研究截止日期</span>
+                        <input
+                          type="date"
+                          value={settings.asOfDate}
+                          onChange={(e) =>
+                            setSettings({
+                              ...settings,
+                              asOfDate: e.target.value,
+                            })
+                          }
+                        />
+                      </label>
+                      <label className="panel-field">
+                        <span>资料 URL（每行一个，下次研究时抓取）</span>
+                        <textarea
+                          value={settings.documentUrls}
+                          rows={4}
+                          placeholder="https://www1.hkexnews.hk/..."
+                          onChange={(e) =>
+                            setSettings({
+                              ...settings,
+                              documentUrls: e.target.value,
+                            })
+                          }
+                        />
+                      </label>
+                    </div>
+                  ),
+                },
+                {
+                  key: "reports",
+                  label: `报告${panelData?.reports?.length ? ` (${panelData.reports.length})` : ""}`,
+                  children: (
+                    <div className="panel-section">
+                      {panelLoading ? (
+                        <div className="panel-empty">正在加载…</div>
+                      ) : (panelData?.reports?.length ?? 0) > 0 ? (
+                        panelData!.reports!.map((item) => (
+                          <button
+                            className="report-item"
+                            key={item.id}
+                            disabled={reportLoadingId === item.id}
+                            onClick={() => void openReport(item.id)}
+                          >
+                            <FileText size={13} />
+                            <span className="report-item-title">
+                              {item.question || "研究报告"}
+                            </span>
+                            <small>
+                              {item.created_at?.slice(0, 10)} · v{item.version}
+                            </small>
+                          </button>
+                        ))
+                      ) : (
+                        <div className="panel-empty">
+                          暂无研究报告。在对话中说「研究这家公司」即可生成。
+                        </div>
+                      )}
+                    </div>
+                  ),
+                },
+                {
+                  key: "news",
+                  label: "动态",
+                  children: (
+                    <div className="panel-section">
+                      {newsLoading ? (
+                        <div className="panel-empty">正在加载动态…</div>
+                      ) : (newsItems?.length ?? 0) > 0 ? (
+                        newsItems!.map((item, index) => (
+                          <a
+                            className="news-item"
+                            key={`${item.url}-${index}`}
+                            href={item.url}
+                            target="_blank"
+                            rel="noreferrer"
+                          >
+                            <span className="news-title">{item.title}</span>
+                            {item.source && (
+                              <small className="news-source">
+                                {item.source}
+                              </small>
+                            )}
+                          </a>
+                        ))
+                      ) : (
+                        <div className="panel-empty">暂无相关动态</div>
+                      )}
+                    </div>
+                  ),
+                },
+              ]}
+            />
           </div>
         </aside>
       )}
+      <Modal
+        open={!!reportViewer}
+        onCancel={() => setReportViewer(null)}
+        footer={null}
+        width={880}
+        title={reportViewer ? `${reportViewer.company.name} 研究报告` : "研究报告"}
+      >
+        {reportViewer && <ReportCard report={reportViewer} />}
+      </Modal>
       {searchOpen && (
         <div className="search-overlay" role="dialog" aria-modal="true" aria-label="搜索会话" onMouseDown={() => setSearchOpen(false)}>
           <div className="search-dialog" onMouseDown={event => event.stopPropagation()}>

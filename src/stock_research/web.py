@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 import json
 import mimetypes
@@ -24,6 +24,7 @@ from .workflow import ResearchWorkflow
 from .jobs import create_and_enqueue, queue_from_env
 from .hk_companies import list_hk_companies
 from .web_search import DuckDuckGoSearch, GoogleNewsSearch
+from .market_data import MarketDataError, YahooFinanceProvider
 
 
 HTML = r"""<!doctype html>
@@ -427,8 +428,91 @@ def chat_entry_payload(payload: dict[str, Any], db_path: str | Path | None = Non
     return chat_payload(session_id, content, db_path=db_path, as_of_date=date.fromisoformat(payload["as_of_date"]) if payload.get("as_of_date") else None, llm_config=payload.get("llm"))
 
 
+def _yahoo_symbol(symbol: str, market: str) -> str:
+    digits = "".join(ch for ch in symbol if ch.isdigit())
+    if market.upper() == "HK" and digits:
+        return f"{int(digits):04d}.HK"
+    return symbol
+
+
+def _quote_payload(symbol: str, market: str) -> dict[str, Any]:
+    """Best-effort delayed price snapshot; never raises for provider issues."""
+    yahoo = _yahoo_symbol(symbol, market)
+    today = date.today()
+    try:
+        bars = YahooFinanceProvider().get_daily_bars(yahoo, today - timedelta(days=380), today)
+    except (MarketDataError, ValueError):
+        return {"available": False, "symbol": yahoo, "delayed": True}
+    if not bars:
+        return {"available": False, "symbol": yahoo, "delayed": True}
+    last = bars[-1]
+    prev = bars[-2] if len(bars) >= 2 else None
+    change = round(last.close - prev.close, 4) if prev else None
+    change_pct = round((last.close - prev.close) / prev.close, 6) if prev and prev.close else None
+    return {
+        "available": True,
+        "symbol": yahoo,
+        "delayed": True,
+        "provider": last.provider,
+        "currency": "HKD" if market.upper() == "HK" else "",
+        "last": last.close,
+        "change": change,
+        "change_pct": change_pct,
+        "high_52w": max(bar.high for bar in bars),
+        "low_52w": min(bar.low for bar in bars),
+        "as_of": last.trading_date.isoformat(),
+    }
+
+
+def _news_payload(name: str, symbol: str) -> list[dict[str, str]]:
+    candidates = [f"{name} 最新", name, symbol]
+    for candidate in candidates:
+        if not candidate.strip():
+            continue
+        results = GoogleNewsSearch().search(candidate.strip(), max_results=8)
+        if results:
+            return [{"title": item.title, "url": item.url, "source": item.snippet} for item in results]
+    return []
+
+
+def _company_panel_payload(symbol: str, market: str) -> dict[str, Any]:
+    store = SQLiteStore(database_path())
+    try:
+        project = store.find_project(symbol, market)
+        if project is None:
+            return {"available": False}
+        return {
+            "available": True,
+            "project": {"id": str(project.id), "name": project.name, "symbol": project.symbol, "market": project.market},
+            "documents": store.list_company_documents(project.company_id),
+            "reports": store.list_project_reports(project.id),
+        }
+    finally:
+        store.close()
+
+
 def history_payload(path: str) -> dict[str, Any] | list[dict[str, Any]]:
     parsed = urlparse(path)
+    if parsed.path == "/api/company-panel":
+        query = parse_qs(parsed.query)
+        symbol = (query.get("symbol") or [""])[0].strip()
+        market = (query.get("market") or ["HK"])[0].strip().upper() or "HK"
+        if not symbol:
+            raise ValueError("symbol is required")
+        return _company_panel_payload(symbol, market)
+    if parsed.path == "/api/news":
+        query = parse_qs(parsed.query)
+        name = (query.get("name") or [""])[0].strip()
+        symbol = (query.get("symbol") or [""])[0].strip()
+        if not name:
+            raise ValueError("name is required")
+        return _news_payload(name, symbol)
+    if parsed.path.startswith("/api/quote/"):
+        raw = parsed.path.removeprefix("/api/quote/")
+        market = (parse_qs(parsed.query).get("market") or ["HK"])[0].strip().upper() or "HK"
+        if not raw:
+            raise ValueError("symbol is required")
+        return _quote_payload(raw, market)
     store = SQLiteStore(database_path())
     try:
         if parsed.path == "/api/companies":
@@ -533,7 +617,7 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
                 self._send(404, b"not found", "text/plain; charset=utf-8")
         elif self.path in {"/api/status", "/api/settings"}:
             self._send(200, json.dumps(provider_status(), ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
-        elif self.path.startswith(("/api/companies", "/api/company-catalog", "/api/projects", "/api/search", "/api/runs", "/api/jobs/", "/api/reports/", "/api/sessions/")):
+        elif self.path.startswith(("/api/companies", "/api/company-catalog", "/api/company-panel", "/api/quote/", "/api/news", "/api/projects", "/api/search", "/api/runs", "/api/jobs/", "/api/reports/", "/api/sessions/")):
             try:
                 response = history_payload(self.path)
                 self._send(200, json.dumps(response, ensure_ascii=False, default=str).encode("utf-8"), "application/json; charset=utf-8")

@@ -549,6 +549,23 @@ class SQLiteStore:
         rows = self.connection.execute("SELECT id,version,created_at FROM reports WHERE run_id=? ORDER BY version", (str(run_id),)).fetchall()
         return [dict(row) for row in rows]
 
+    def list_company_documents(self, company_id: UUID) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT id, source_type, source_url, title, published_at FROM documents WHERE company_id=? ORDER BY published_at DESC, id",
+            (str(company_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_project_reports(self, project_id: UUID) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            """SELECT r.id, r.run_id, r.version, r.created_at, ru.status AS run_status, ru.question
+               FROM reports r JOIN runs ru ON ru.id=r.run_id
+               WHERE ru.project_id=? ORDER BY r.created_at DESC""",
+            (str(project_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+
     def load_run(self, run_id: UUID) -> ResearchRun:
         row = self.connection.execute("SELECT * FROM runs WHERE id=?", (str(run_id),)).fetchone()
         if row is None:

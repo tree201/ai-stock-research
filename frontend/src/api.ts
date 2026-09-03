@@ -35,6 +35,7 @@ export const api = {
   removeCompanySource: (sourceId: string) => request<{ ok: boolean }>(`/api/company-panel/sources/${sourceId}`, { method: "DELETE" }),
   quote: (symbol: string, market: string) => request<Quote>(`/api/quote/${encodeURIComponent(symbol)}?market=${encodeURIComponent(market)}`),
   news: (name: string, symbol: string) => request<NewsItem[]>(`/api/news?name=${encodeURIComponent(name)}&symbol=${encodeURIComponent(symbol)}`),
+  article: (url: string) => request<ArticleReader>(`/api/article?url=${encodeURIComponent(url)}`),
   settings: () => request<ModelSettings>('/api/settings'),
   saveSettings: (settings: ModelSettings) => request<ModelSettings>('/api/settings', { method: 'POST', body: JSON.stringify(settings) }),
 };
@@ -46,4 +47,5 @@ export type PanelSource = { id: string; url: string; title?: string | null; crea
 export type PanelDocument = { id: string; source_type: string; source_url: string; title: string; published_at?: string | null };
 export type PanelReport = { id: string; run_id: string; version: number; created_at: string; run_status?: string; question?: string };
 export type CompanyPanel = { available: boolean; project?: { id: string; name: string; symbol: string; market: string }; sources?: PanelSource[]; documents?: PanelDocument[]; reports?: PanelReport[] };
-export type NewsItem = { title: string; url: string; source?: string };
+export type NewsItem = { title: string; url: string; source?: string; time?: string | null };
+export type ArticleReader = { ok: boolean; url: string; text: string };

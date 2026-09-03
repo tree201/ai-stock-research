@@ -1,3 +1,4 @@
+import base64
 import os
 from datetime import date, datetime, timezone
 from tempfile import TemporaryDirectory
@@ -343,13 +344,63 @@ class WebMvpTests(unittest.TestCase):
 
             def search(self, query, max_results=5):
                 self.query = query
-                return [SearchResult(title="t", url="https://example.com", snippet="s")]
+                return [
+                    SearchResult(
+                        title="t", url="https://example.com", snippet="s",
+                        published="Thu, 03 Sep 2026 21:15:00 GMT",
+                    )
+                ]
 
         fake = FakeNews()
         with patch("stock_research.service.GoogleNewsSearch", return_value=fake):
             news = history_payload("/api/news?name=CKH%20HOLDINGS&symbol=00001")
         self.assertEqual(news[0]["url"], "https://example.com")
+        self.assertEqual(news[0]["time"], "Thu, 03 Sep 2026 21:15:00 GMT")
         self.assertEqual(fake.query, "CKH HOLDINGS 最新")
+
+    def test_article_endpoint_extracts_readable_text(self) -> None:
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self, _limit):
+                return (
+                    "<html><body><h1>标题</h1><p>长江和记最新正文内容。</p></body></html>"
+                ).encode("utf-8")
+
+            def get_header(self, name, _default=None):
+                return "text/html" if name == "Content-Type" else None
+
+            def geturl(self):
+                return "https://example.com/news/1"
+
+        fake_response = FakeResponse()
+        fake_response.headers = {"Content-Type": "text/html"}
+
+        with patch("stock_research.service.urlopen", return_value=fake_response):
+            article = history_payload("/api/article?url=https%3A%2F%2Fexample.com%2Fnews%2F1")
+        self.assertTrue(article["ok"])
+        self.assertIn("长江和记最新正文内容", article["text"])
+
+    def test_article_endpoint_blocks_private_hosts(self) -> None:
+        with self.assertRaises(ValueError):
+            history_payload("/api/article?url=http%3A%2F%2F127.0.0.1%2Fsecret")
+        with self.assertRaises(ValueError):
+            history_payload("/api/article?url=http%3A%2F%2F192.168.1.5%2Fsecret")
+
+    def test_resolve_google_news_old_format_id(self) -> None:
+        from stock_research.service import resolve_google_news_url
+
+        direct = "https://finance.sina.com.cn/news/2026-09-01/doc.shtml"
+        encoded = base64.urlsafe_b64encode(b"\x08\x13\x32\x10" + direct.encode()).decode().rstrip("=")
+        resolved = resolve_google_news_url(f"https://news.google.com/rss/articles/{encoded}?oc=5")
+        self.assertEqual(resolved, direct)
+        new_format = "https://news.google.com/rss/articles/CBMiU0FVX3lxTE9YU3I4M0w2WnNYSUNNLWZCRENHY1ct?oc=5"
+        self.assertEqual(resolve_google_news_url(new_format), new_format)
+        self.assertEqual(resolve_google_news_url("https://example.com/a"), "https://example.com/a")
 
     def test_company_sources_persist_and_feed_research(self) -> None:
         class FakeFetcher:

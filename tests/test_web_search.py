@@ -53,7 +53,8 @@ SAMPLE_RSS = (
     '<rss version="2.0"><channel>'
     "<item><title>长江和记向巴拿马索赔逾15亿美元</title>"
     "<link>https://news.google.com/rss/articles/abc</link>"
-    "<source>腾讯新闻</source><description>描述</description></item>"
+    "<source>腾讯新闻</source><description>描述</description>"
+    "<pubDate>Thu, 03 Sep 2026 21:15:00 GMT</pubDate></item>"
     "</channel></rss>"
 )
 
@@ -65,6 +66,7 @@ class GoogleNewsTests(TestCase):
         self.assertEqual(results[0].title, "长江和记向巴拿马索赔逾15亿美元")
         self.assertEqual(results[0].url, "https://news.google.com/rss/articles/abc")
         self.assertEqual(results[0].snippet, "腾讯新闻")
+        self.assertEqual(results[0].published, "Thu, 03 Sep 2026 21:15:00 GMT")
 
     def test_parse_rejects_invalid_xml(self) -> None:
         self.assertEqual(GoogleNewsSearch._parse("<not-xml"), [])

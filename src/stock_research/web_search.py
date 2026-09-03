@@ -25,6 +25,7 @@ class SearchResult:
     title: str
     url: str
     snippet: str
+    published: str | None = None
 
 
 _USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
@@ -123,6 +124,9 @@ class GoogleNewsSearch:
             title = (item.findtext("title") or "").strip()
             link = (item.findtext("link") or "").strip()
             source = (item.findtext("source") or "").strip()
+            published = (item.findtext("pubDate") or "").strip() or None
             if title and link:
-                results.append(SearchResult(title=title, url=link, snippet=source))
+                results.append(
+                    SearchResult(title=title, url=link, snippet=source, published=published)
+                )
         return results

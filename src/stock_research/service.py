@@ -4,13 +4,18 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
+import base64
+import ipaddress
+import json
+import re
 import os
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
 
-from .documents import HttpDocumentFetcher, PdfTextExtractor, RawDocument, extract_text
+from .documents import FetchedDocument, HttpDocumentFetcher, PdfTextExtractor, RawDocument, UnsupportedDocumentType, extract_text
 from .domain import ResearchProject, ResearchSession, SessionMessage, utc_now
 from .pipeline import ResearchPipeline
 from .llm import LLMError, ModelNotConfiguredError, provider_from_config, provider_from_env
@@ -402,15 +407,93 @@ def quote_payload(symbol: str, market: str) -> dict[str, Any]:
     }
 
 
-def news_payload(name: str, symbol: str) -> list[dict[str, str]]:
+def news_payload(name: str, symbol: str) -> list[dict[str, Any]]:
     candidates = [f"{name} 最新", name, symbol]
     for candidate in candidates:
         if not candidate.strip():
             continue
         results = GoogleNewsSearch().search(candidate.strip(), max_results=8)
         if results:
-            return [{"title": item.title, "url": item.url, "source": item.snippet} for item in results]
+            return [
+                {
+                    "title": item.title,
+                    "url": item.url,
+                    "source": item.snippet,
+                    "time": item.published,
+                }
+                for item in results
+            ]
     return []
+
+
+def resolve_google_news_url(url: str) -> str:
+    """Resolve old-format Google News redirect IDs to the publisher URL.
+
+    New-format IDs encode an internal story key that only resolves via an
+    undocumented Google endpoint; those stay as-is and the reader falls back
+    to the new-tab affordance.
+    """
+    if "news.google.com" not in urlparse(url).netloc:
+        return url
+    if "/articles/" not in url:
+        return url
+    article_id = url.split("/articles/")[1].split("?")[0]
+    padded = article_id + "=" * (-len(article_id) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(padded)
+    except Exception:
+        return url
+    match = re.search(rb"https://[\x21-\x7e]+", decoded)
+    if match:
+        return match.group(0).decode("ascii", "ignore")
+    return url
+
+
+def article_payload(url: str) -> dict[str, Any]:
+    """Fetch a public article and extract readable text for the in-app reader."""
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("阅读地址必须是 http(s) 链接")
+    resolved = resolve_google_news_url(url)
+    if "news.google.com" in urlparse(resolved).netloc:
+        raise ValueError("该新闻由 Google 新闻中转，暂不支持站内阅读，请在新标签页打开原文")
+    host = (urlparse(resolved).hostname or "").lower()
+    blocked = not host or host in {"localhost"} or host.endswith(".local")
+    if not blocked:
+        try:
+            parsed_ip = ipaddress.ip_address(host)
+            blocked = parsed_ip.is_private or parsed_ip.is_loopback or parsed_ip.is_link_local
+        except ValueError:
+            blocked = False
+    if blocked:
+        raise ValueError("该地址不支持在阅读器中打开，请使用新标签页访问")
+    request = Request(
+        resolved,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        },
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            body = response.read(2_000_000)
+            content_type = response.headers.get("Content-Type", "text/html")
+            final_url = response.geturl()
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"正文抓取失败：{exc}") from exc
+    lowered_head = body[:2048].lstrip().lower()
+    if "html" not in content_type and (lowered_head.startswith(b"<!doctype") or lowered_head.startswith(b"<html")):
+        content_type = "text/html"
+    try:
+        text = extract_text(FetchedDocument(final_url, content_type, body, datetime.now(timezone.utc)))
+    except UnsupportedDocumentType:
+        raise ValueError("该链接的内容类型暂不支持站内阅读，请在新标签页打开原文")
+    if not text.strip():
+        raise ValueError("未能提取到正文，请使用新标签页访问原文")
+    return {"ok": True, "url": final_url, "text": text[:60000]}
 
 
 def company_panel_payload(symbol: str, market: str) -> dict[str, Any]:
@@ -455,6 +538,11 @@ def remove_company_source(source_id: str) -> None:
 
 def history_payload(path: str) -> dict[str, Any] | list[dict[str, Any]]:
     parsed = urlparse(path)
+    if parsed.path == "/api/article":
+        url = (parse_qs(parsed.query).get("url") or [""])[0].strip()
+        if not url:
+            raise ValueError("url is required")
+        return article_payload(url)
     if parsed.path == "/api/company-panel":
         query = parse_qs(parsed.query)
         symbol = (query.get("symbol") or [""])[0].strip()

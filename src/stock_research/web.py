@@ -158,7 +158,7 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
                 self._send(404, b"not found", "text/plain; charset=utf-8")
         elif self.path in {"/api/status", "/api/settings"}:
             self._send(200, json.dumps(provider_status(), ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
-        elif self.path.startswith(("/api/companies", "/api/company-catalog", "/api/company-panel", "/api/quote/", "/api/news", "/api/projects", "/api/search", "/api/runs", "/api/jobs/", "/api/reports/", "/api/sessions/")):
+        elif self.path.startswith(("/api/companies", "/api/company-catalog", "/api/company-panel", "/api/article", "/api/quote/", "/api/news", "/api/projects", "/api/search", "/api/runs", "/api/jobs/", "/api/reports/", "/api/sessions/")):
             try:
                 response = history_payload(self.path)
                 self._send(200, json.dumps(response, ensure_ascii=False, default=str).encode("utf-8"), "application/json; charset=utf-8")

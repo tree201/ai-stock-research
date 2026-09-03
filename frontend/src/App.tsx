@@ -6,6 +6,7 @@ import {
   BarChart3,
   ChevronDown,
   ChevronRight,
+  ExternalLink,
   FileText,
   ListTodo,
   MessageSquare,
@@ -18,6 +19,7 @@ import {
 } from "lucide-react";
 import {
   api,
+  ArticleReader,
   Company,
   CompanyCatalogEntry,
   CompanyPanel,
@@ -31,6 +33,20 @@ import {
   SearchResult,
   Session,
 } from "./api";
+
+function relativeTime(value?: string | null): string {
+  if (!value) return "";
+  const ts = Date.parse(value);
+  if (Number.isNaN(ts)) return "";
+  const minutes = Math.floor((Date.now() - ts) / 60000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days} 天前`;
+  return new Date(ts).toLocaleDateString("zh-CN");
+}
 
 function MessageBubble({ message }: { message: Message }) {
   if (message.message_type === "report_card") return null;
@@ -352,6 +368,15 @@ export default function App() {
   const [newReportBadge, setNewReportBadge] = useState(false);
   const [reportViewer, setReportViewer] = useState<Report | null>(null);
   const [reportLoadingId, setReportLoadingId] = useState<string | null>(null);
+  const [articleViewer, setArticleViewer] = useState<{
+    url: string;
+    title: string;
+  } | null>(null);
+  const [articleReader, setArticleReader] = useState<ArticleReader | null>(
+    null,
+  );
+  const [articleLoading, setArticleLoading] = useState(false);
+  const [articleError, setArticleError] = useState("");
   const [pendingJob, setPendingJob] = useState<Job | null>(null);
   const [progressRun, setProgressRun] = useState<Run | undefined>();
   const [input, setInput] = useState("");
@@ -589,6 +614,21 @@ export default function App() {
       setError(err instanceof Error ? err.message : "报告加载失败");
     } finally {
       setReportLoadingId(null);
+    }
+  }
+
+  async function openArticle(item: NewsItem) {
+    setArticleViewer({ url: item.url, title: item.title });
+    setArticleReader(null);
+    setArticleError("");
+    setArticleLoading(true);
+    try {
+      const reader = await api.article(item.url);
+      setArticleReader(reader);
+    } catch (err) {
+      setArticleError(err instanceof Error ? err.message : "正文抓取失败");
+    } finally {
+      setArticleLoading(false);
     }
   }
 
@@ -1186,20 +1226,21 @@ export default function App() {
                         <div className="panel-empty">正在加载动态…</div>
                       ) : (newsItems?.length ?? 0) > 0 ? (
                         newsItems!.map((item, index) => (
-                          <a
-                            className="news-item"
+                          <button
+                            className="news-card"
                             key={`${item.url}-${index}`}
-                            href={item.url}
-                            target="_blank"
-                            rel="noreferrer"
+                            onClick={() => void openArticle(item)}
                           >
                             <span className="news-title">{item.title}</span>
-                            {item.source && (
-                              <small className="news-source">
-                                {item.source}
-                              </small>
-                            )}
-                          </a>
+                            <span className="news-meta">
+                              {item.source && (
+                                <span className="news-chip">{item.source}</span>
+                              )}
+                              <span className="news-time">
+                                {relativeTime(item.time)}
+                              </span>
+                            </span>
+                          </button>
                         ))
                       ) : (
                         <div className="panel-empty">暂无相关动态</div>
@@ -1220,6 +1261,41 @@ export default function App() {
         title={reportViewer ? `${reportViewer.company.name} 研究报告` : "研究报告"}
       >
         {reportViewer && <ReportCard report={reportViewer} />}
+      </Modal>
+      <Modal
+        open={!!articleViewer}
+        onCancel={() => setArticleViewer(null)}
+        footer={null}
+        width={760}
+        title={articleViewer?.title || "新闻阅读"}
+      >
+        <div className="article-reader">
+          <div className="article-actions">
+            <button
+              className="article-open"
+              disabled={!articleViewer}
+              onClick={() =>
+                articleViewer &&
+                window.open(articleViewer.url, "_blank", "noopener")
+              }
+            >
+              <ExternalLink size={13} /> 在新标签页打开原文
+            </button>
+          </div>
+          {articleLoading ? (
+            <div className="panel-empty">正在抓取正文…</div>
+          ) : articleError ? (
+            <div className="panel-empty">
+              {articleError}
+              <br />
+              可以点击上方按钮直接访问原文。
+            </div>
+          ) : (
+            articleReader && (
+              <div className="article-text">{articleReader.text}</div>
+            )
+          )}
+        </div>
       </Modal>
       {searchOpen && (
         <div className="search-overlay" role="dialog" aria-modal="true" aria-label="搜索会话" onMouseDown={() => setSearchOpen(false)}>

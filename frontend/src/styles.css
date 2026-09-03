@@ -201,3 +201,11 @@ body { background:var(--paper); color:var(--ink); }
 .panel-field input, .panel-field textarea { border:1px solid #cbd6d0; border-radius:8px; padding:7px 9px; font:inherit; font-size:12px; outline:0; background:#fff; }
 .panel-field textarea { resize:vertical; min-height:72px; }
 .panel-toggle-inner { display:inline-flex; align-items:center; gap:5px; }
+.source-add { display:flex; gap:6px; }
+.source-add input { flex:1; min-width:0; border:1px solid #cbd6d0; border-radius:8px; padding:7px 9px; font:inherit; font-size:12px; outline:0; background:#fff; }
+.source-add button { flex:0 0 auto; border:0; border-radius:8px; padding:7px 12px; background:var(--signal); color:#fff; font-size:12px; font-weight:600; }
+.source-add button:disabled { opacity:.5; cursor:wait; }
+.panel-hint { color:#9aa6a0; font-size:10px; line-height:1.5; }
+.source-item { display:flex; align-items:center; gap:8px; width:100%; border:1px solid #e2e7e2; border-radius:9px; background:#fff; padding:8px 11px; font-size:12px; color:#2a3530; }
+.source-remove { flex:0 0 auto; border:0; background:transparent; color:#9aa6a0; font-size:15px; line-height:1; padding:2px 4px; }
+.source-remove:hover { color:#b4472f; }

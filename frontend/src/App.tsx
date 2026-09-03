@@ -360,9 +360,9 @@ export default function App() {
   const [settings, setSettings] = useState({
     name: "腾讯（示例）",
     symbol: "00700",
-    asOfDate: "2025-12-31",
-    documentUrls: "",
   });
+  const [newSourceUrl, setNewSourceUrl] = useState("");
+  const [sourceBusy, setSourceBusy] = useState(false);
   const [modelSettings, setModelSettings] = useState<ModelSettings>({
     provider: "deepseek",
     base_url: "https://api.deepseek.com/v1",
@@ -592,6 +592,44 @@ export default function App() {
     }
   }
 
+  async function addSource() {
+    if (!panelCompany || !newSourceUrl.trim()) return;
+    setSourceBusy(true);
+    try {
+      const updated = await api.addCompanySource(
+        panelCompany.symbol,
+        panelCompany.market,
+        newSourceUrl.trim(),
+      );
+      setPanelData((prev) =>
+        prev ? { ...prev, sources: updated.sources } : updated,
+      );
+      setNewSourceUrl("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "资料源登记失败");
+    } finally {
+      setSourceBusy(false);
+    }
+  }
+
+  async function removeSource(sourceId: string) {
+    try {
+      await api.removeCompanySource(sourceId);
+      setPanelData((prev) =>
+        prev
+          ? {
+              ...prev,
+              sources: (prev.sources || []).filter(
+                (item) => item.id !== sourceId,
+              ),
+            }
+          : prev,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "资料源移除失败");
+    }
+  }
+
   async function openSession(
     session: Session,
     companyNameValue: string,
@@ -716,19 +754,11 @@ export default function App() {
           }
         : undefined;
       const result = sessionId
-        ? await api.message(
-            sessionId,
-            text,
-            settings.asOfDate,
-            llm,
-            settings.documentUrls,
-          )
+        ? await api.message(sessionId, text, llm)
         : await api.chat({
             name: settings.name,
             symbol: settings.symbol,
-            as_of_date: settings.asOfDate,
             content: text,
-            document_urls: settings.documentUrls,
             llm,
           });
       if (result.session_id) {
@@ -1030,10 +1060,65 @@ export default function App() {
                 },
                 {
                   key: "sources",
-                  label: `资料${panelData?.documents?.length ? ` (${panelData.documents.length})` : ""}`,
+                  label: `资料${panelData?.sources?.length ? ` (${panelData.sources.length})` : ""}`,
                   children: (
                     <div className="panel-section">
-                      <div className="panel-subtitle">已归档资料</div>
+                      <div className="panel-subtitle">登记资料源</div>
+                      <div className="source-add">
+                        <input
+                          value={newSourceUrl}
+                          placeholder="https://www1.hkexnews.hk/..."
+                          onChange={(e) => setNewSourceUrl(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") {
+                              e.preventDefault();
+                              void addSource();
+                            }
+                          }}
+                        />
+                        <button
+                          disabled={
+                            sourceBusy || !panelCompany || !newSourceUrl.trim()
+                          }
+                          onClick={() => void addSource()}
+                        >
+                          {sourceBusy ? "登记中…" : "登记"}
+                        </button>
+                      </div>
+                      <div className="panel-hint">
+                        登记后会在每次研究时自动抓取（仅支持 HKEX
+                        等已授权公开域名）。
+                      </div>
+                      {(panelData?.sources?.length ?? 0) > 0 ? (
+                        panelData!.sources!.map((source) => (
+                          <div className="source-item" key={source.id}>
+                            <FileText size={13} />
+                            <a
+                              className="doc-title"
+                              href={source.url}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {source.title || source.url}
+                            </a>
+                            <button
+                              className="source-remove"
+                              aria-label="移除资料源"
+                              disabled={sourceBusy}
+                              onClick={() => void removeSource(source.id)}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))
+                      ) : (
+                        <div className="panel-empty">
+                          暂无登记资料源。粘贴 HKEX/公司 IR 链接并登记。
+                        </div>
+                      )}
+                      <div className="panel-subtitle">
+                        已归档文档（{panelData?.documents?.length ?? 0}）
+                      </div>
                       {(panelData?.documents?.length ?? 0) > 0 ? (
                         panelData!.documents!.map((doc) => (
                           <a
@@ -1054,37 +1139,9 @@ export default function App() {
                         ))
                       ) : (
                         <div className="panel-empty">
-                          暂无归档资料。添加 URL 后发起一次研究即可沉淀。
+                          暂无归档文档。研究完成后抓取的资料会沉淀在这里。
                         </div>
                       )}
-                      <div className="panel-subtitle">研究设置</div>
-                      <label className="panel-field">
-                        <span>研究截止日期</span>
-                        <input
-                          type="date"
-                          value={settings.asOfDate}
-                          onChange={(e) =>
-                            setSettings({
-                              ...settings,
-                              asOfDate: e.target.value,
-                            })
-                          }
-                        />
-                      </label>
-                      <label className="panel-field">
-                        <span>资料 URL（每行一个，下次研究时抓取）</span>
-                        <textarea
-                          value={settings.documentUrls}
-                          rows={4}
-                          placeholder="https://www1.hkexnews.hk/..."
-                          onChange={(e) =>
-                            setSettings({
-                              ...settings,
-                              documentUrls: e.target.value,
-                            })
-                          }
-                        />
-                      </label>
                     </div>
                   ),
                 },

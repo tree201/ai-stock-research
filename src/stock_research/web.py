@@ -307,6 +307,18 @@ def run_research_payload(payload: dict[str, Any], db_path: str | Path | None = N
         pipeline.workflow.create_session(session)
         if not payload.get("_session_message_saved"):
             store.save_session_message(SessionMessage(session.id, "user", "text", {"text": question}))
+        requested_urls = payload.get("document_urls") or payload.get("document_url") or []
+        if isinstance(requested_urls, str):
+            requested_urls = [value.strip() for value in requested_urls.replace(",", "\n").splitlines() if value.strip()]
+        registered_urls = store.list_company_source_urls(project.company_id)
+        seen: set[str] = set()
+        merged_urls: list[str] = []
+        for url in [*requested_urls, *registered_urls]:
+            value = str(url).strip()
+            if value and value not in seen:
+                seen.add(value)
+                merged_urls.append(value)
+        payload = {**payload, "document_urls": merged_urls}
         documents = _research_documents(payload, project.company_id, as_of_date)
         report = pipeline.run(
             project_id=project.id,
@@ -372,8 +384,7 @@ def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = No
         research_intent = any(word in lowered for word in ("研究", "分析", "估值", "长期持有", "更新研究"))
         if research_intent:
             if as_of_date is None:
-                previous_runs = store.list_runs(session_id=session_id)
-                as_of_date = date.fromisoformat(previous_runs[0]["as_of_date"]) if previous_runs else date.today()
+                as_of_date = date.today()
             research_payload = {"name": project.name, "symbol": project.symbol, "as_of_date": as_of_date.isoformat(), "question": content, "_session_message_saved": True, "llm": llm_config, "document_urls": document_urls}
             store.save_session_message(SessionMessage(session_id, "user", "text", {"text": content}))
             if os.getenv("AI_STOCK_QUEUE", "inline").casefold() == "rq":
@@ -484,9 +495,33 @@ def _company_panel_payload(symbol: str, market: str) -> dict[str, Any]:
         return {
             "available": True,
             "project": {"id": str(project.id), "name": project.name, "symbol": project.symbol, "market": project.market},
+            "sources": store.list_company_sources(project.company_id),
             "documents": store.list_company_documents(project.company_id),
             "reports": store.list_project_reports(project.id),
         }
+    finally:
+        store.close()
+
+
+def _add_company_source(symbol: str, market: str, url: str, title: str | None = None) -> dict[str, Any]:
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        raise ValueError("资料 URL 必须是 http(s) 链接")
+    store = SQLiteStore(database_path())
+    try:
+        project = store.find_project(symbol, market)
+        if project is None:
+            raise ValueError("company not found")
+        source = store.add_company_source(project.company_id, url, (title or "").strip() or None)
+        return {"available": True, "source": source, "sources": store.list_company_sources(project.company_id)}
+    finally:
+        store.close()
+
+
+def _remove_company_source(source_id: str) -> None:
+    store = SQLiteStore(database_path())
+    try:
+        store.remove_company_source(UUID(source_id))
     finally:
         store.close()
 
@@ -631,7 +666,7 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-        if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/projects"} and not self.path.startswith(("/api/projects/", "/api/sessions/")):
+        if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/projects"} and not self.path.startswith(("/api/projects/", "/api/sessions/", "/api/company-panel")):
             self._send(404, b'{"error":"not found"}', "application/json")
             return
         try:
@@ -684,12 +719,30 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
                     session.close()
             elif self.path == "/api/research":
                 response = run_research_payload(payload)
+            elif self.path == "/api/company-panel/sources":
+                symbol = str(payload.get("symbol", "")).strip()
+                market = str(payload.get("market", "HK")).strip().upper() or "HK"
+                url = str(payload.get("url", "")).strip()
+                title = str(payload.get("title", "")).strip() or None
+                if not symbol or not url:
+                    raise ValueError("symbol and url are required")
+                response = _add_company_source(symbol, market, url, title)
             elif self.path == "/api/chat":
                 response = chat_entry_payload(payload)
             else:
                 self._send(404, b'{"error":"not found"}', "application/json")
                 return
             self._send(200, json.dumps(response, ensure_ascii=False, default=str).encode("utf-8"), "application/json; charset=utf-8")
+        except Exception as exc:
+            self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+    def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
+        if not self.path.startswith("/api/company-panel/sources/"):
+            self._send(404, b'{"error":"not found"}', "application/json")
+            return
+        try:
+            _remove_company_source(self.path.rsplit("/", 1)[-1])
+            self._send(200, b'{"ok": true}', "application/json; charset=utf-8")
         except Exception as exc:
             self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 

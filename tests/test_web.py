@@ -8,7 +8,7 @@ from uuid import UUID
 from stock_research.documents import FetchedDocument
 from stock_research.llm import HeuristicLLMProvider, ModelNotConfiguredError
 from stock_research.market_data import PriceBar
-from stock_research.web import _research_documents, _web_provider, chat_entry_payload, chat_payload, history_payload, provider_status, run_research_payload
+from stock_research.web import _add_company_source, _remove_company_source, _research_documents, _web_provider, chat_entry_payload, chat_payload, history_payload, provider_status, run_research_payload
 from stock_research.jobs import InlineQueue, create_and_enqueue, execute_research_job
 from stock_research.storage import SQLiteStore
 from stock_research.web_search import SearchResult
@@ -350,3 +350,34 @@ class WebMvpTests(unittest.TestCase):
             news = history_payload("/api/news?name=CKH%20HOLDINGS&symbol=00001")
         self.assertEqual(news[0]["url"], "https://example.com")
         self.assertEqual(fake.query, "CKH HOLDINGS 最新")
+
+    def test_company_sources_persist_and_feed_research(self) -> None:
+        class FakeFetcher:
+            def __init__(self, **_kwargs):
+                pass
+
+            def fetch(self, url: str) -> FetchedDocument:
+                return FetchedDocument(url, "text/html", b"<p>Revenue FY2024 HK$ 100 million</p>", datetime.now(timezone.utc))
+
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
+            clear=False,
+        ):
+            chat_entry_payload({"name": "腾讯", "symbol": "00700", "content": "你好"}, db_path=f"{directory}/research.sqlite3")
+            added = _add_company_source("00700", "HK", "https://ir.example.com/results.html")
+            duplicate = _add_company_source("00700", "HK", "https://ir.example.com/results.html")
+            self.assertEqual(added["source"]["id"], duplicate["source"]["id"])
+            panel = history_payload("/api/company-panel?symbol=00700&market=HK")
+            self.assertEqual(len(panel["sources"]), 1)
+            with patch("stock_research.web.HttpDocumentFetcher", FakeFetcher):
+                run_research_payload({
+                    "name": "腾讯", "symbol": "00700", "as_of_date": date.today().isoformat(), "question": "研究公司",
+                }, db_path=f"{directory}/research.sqlite3")
+            panel_after = history_payload("/api/company-panel?symbol=00700&market=HK")
+            self.assertTrue(
+                any(doc["source_url"] == "https://ir.example.com/results.html" for doc in panel_after["documents"]),
+            )
+            _remove_company_source(added["source"]["id"])
+            panel_removed = history_payload("/api/company-panel?symbol=00700&market=HK")
+            self.assertEqual(len(panel_removed["sources"]), 0)

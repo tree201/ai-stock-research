@@ -8,7 +8,7 @@ from uuid import UUID
 from stock_research.documents import FetchedDocument
 from stock_research.llm import HeuristicLLMProvider, ModelNotConfiguredError
 from stock_research.market_data import PriceBar
-from stock_research.web import _research_documents, _web_provider, chat_entry_payload, chat_payload, history_payload, provider_status, run_research_payload
+from stock_research.service import chat_entry_payload, chat_payload, history_payload, provider_status, research_documents, resolve_provider, run_research_payload
 from stock_research.jobs import InlineQueue, create_and_enqueue, execute_research_job
 from stock_research.storage import SQLiteStore
 from stock_research.web_search import SearchResult
@@ -19,7 +19,7 @@ class WebMvpTests(unittest.TestCase):
         # Existing workflow tests exercise persistence and calculations with a
         # deterministic test double; production entry points still reject a
         # missing real provider (covered explicitly below).
-        self._provider_patch = patch("stock_research.web._web_provider", return_value=HeuristicLLMProvider())
+        self._provider_patch = patch("stock_research.service.resolve_provider", return_value=HeuristicLLMProvider())
         self._provider_patch.start()
 
     def tearDown(self) -> None:
@@ -29,7 +29,7 @@ class WebMvpTests(unittest.TestCase):
         self._provider_patch.stop()
         with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""}, clear=False):
             with self.assertRaises(ModelNotConfiguredError):
-                _web_provider()
+                resolve_provider()
     def test_inline_queue_completes_and_persists_job(self) -> None:
         with TemporaryDirectory() as directory, patch.dict(
             os.environ,
@@ -57,7 +57,7 @@ class WebMvpTests(unittest.TestCase):
             clear=False,
         ):
             first = chat_entry_payload({"name": "腾讯", "symbol": "00700", "content": "你好"}, db_path=f"{directory}/research.sqlite3")
-            with patch("stock_research.web.create_and_enqueue", return_value={"job_id": "job-1", "queue_job_id": "rq-1"}):
+            with patch("stock_research.service.create_and_enqueue", return_value={"job_id": "job-1", "queue_job_id": "rq-1"}):
                 result = chat_payload(UUID(first["session_id"]), "研究这家公司", db_path=f"{directory}/research.sqlite3")
             self.assertEqual(result["type"], "research_queued")
             self.assertEqual(result["job_id"], "job-1")
@@ -123,8 +123,8 @@ class WebMvpTests(unittest.TestCase):
             def fetch(self, url: str) -> FetchedDocument:
                 return FetchedDocument(url, "text/html", b"<p>Revenue FY2024 HK$ 100 million</p>", datetime.now(timezone.utc))
 
-        with patch("stock_research.web.HttpDocumentFetcher", FakeFetcher):
-            documents = _research_documents({"document_urls": ["https://ir.example.com/results.html"]}, UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), date(2025, 12, 31))
+        with patch("stock_research.service.HttpDocumentFetcher", FakeFetcher):
+            documents = research_documents({"document_urls": ["https://ir.example.com/results.html"]}, UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"), date(2025, 12, 31))
         self.assertEqual(documents[0].source_type, "company_ir")
         self.assertEqual(documents[0].source_url, "https://ir.example.com/results.html")
         self.assertIn("Revenue FY2024", documents[0].content)
@@ -206,7 +206,7 @@ class WebMvpTests(unittest.TestCase):
                 "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
                 "document": "Revenue FY2024 HK$ 100 million\nNet income FY2024 HK$ 20 million",
             }, db_path=f"{directory}/research.sqlite3")
-            with patch("stock_research.web._web_provider", return_value=FakeProvider()):
+            with patch("stock_research.service.resolve_provider", return_value=FakeProvider()):
                 answer = chat_payload(UUID(report["session_id"]), "利润率怎么看？", db_path=f"{directory}/research.sqlite3")
             self.assertEqual(answer["message"], "基于报告，净利润率约为 20%。")
 
@@ -237,8 +237,8 @@ class WebMvpTests(unittest.TestCase):
                 "document": "Revenue FY2024 HK$ 100 million",
             }, db_path=f"{directory}/research.sqlite3")
             provider = FakeProvider()
-            with patch("stock_research.web._web_provider", return_value=provider), \
-                 patch("stock_research.web.DuckDuckGoSearch", FakeSearch):
+            with patch("stock_research.service.resolve_provider", return_value=provider), \
+                 patch("stock_research.service.DuckDuckGoSearch", FakeSearch):
                 answer = chat_payload(UUID(report["session_id"]), "腾讯最新新闻是什么？", db_path=f"{directory}/research.sqlite3")
             self.assertEqual(answer["message"], "search answer")
             self.assertEqual(provider.calls, ["answer_with_search"])
@@ -264,9 +264,9 @@ class WebMvpTests(unittest.TestCase):
                 "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
                 "document": "Revenue FY2024 HK$ 100 million",
             }, db_path=f"{directory}/research.sqlite3")
-            with patch("stock_research.web._web_provider", return_value=FakeProvider()), \
-                 patch("stock_research.web.DuckDuckGoSearch", EmptySearch), \
-                 patch("stock_research.web.GoogleNewsSearch", EmptySearch):
+            with patch("stock_research.service.resolve_provider", return_value=FakeProvider()), \
+                 patch("stock_research.service.DuckDuckGoSearch", EmptySearch), \
+                 patch("stock_research.service.GoogleNewsSearch", EmptySearch):
                 answer = chat_payload(UUID(report["session_id"]), "腾讯最新新闻", db_path=f"{directory}/research.sqlite3")
             self.assertEqual(answer["message"], "report answer")
 
@@ -315,7 +315,7 @@ class WebMvpTests(unittest.TestCase):
                 return bars
 
         fake = FakeProvider()
-        with patch("stock_research.web.YahooFinanceProvider", return_value=fake):
+        with patch("stock_research.service.YahooFinanceProvider", return_value=fake):
             quote = history_payload("/api/quote/00700?market=HK")
         self.assertTrue(quote["available"])
         self.assertEqual(fake.symbol, "0700.HK")
@@ -331,7 +331,7 @@ class WebMvpTests(unittest.TestCase):
             def get_daily_bars(self, symbol, start, end):
                 raise MarketDataError("down")
 
-        with patch("stock_research.web.YahooFinanceProvider", FailingProvider):
+        with patch("stock_research.service.YahooFinanceProvider", FailingProvider):
             quote = history_payload("/api/quote/00700?market=HK")
         self.assertFalse(quote["available"])
         self.assertTrue(quote["delayed"])
@@ -346,7 +346,7 @@ class WebMvpTests(unittest.TestCase):
                 return [SearchResult(title="t", url="https://example.com", snippet="s")]
 
         fake = FakeNews()
-        with patch("stock_research.web.GoogleNewsSearch", return_value=fake):
+        with patch("stock_research.service.GoogleNewsSearch", return_value=fake):
             news = history_payload("/api/news?name=CKH%20HOLDINGS&symbol=00001")
         self.assertEqual(news[0]["url"], "https://example.com")
         self.assertEqual(fake.query, "CKH HOLDINGS 最新")

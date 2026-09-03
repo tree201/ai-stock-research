@@ -32,7 +32,7 @@ def execute_research_job(job_id: str, db_path: str) -> dict[str, Any]:
         job_uuid = UUID(job_id)
         store.update_job(job_uuid, status="running", attempts=int(job["attempts"]) + 1)
         store.append_session_event(UUID(job["session_id"]), "research/running", {"preview": "后台研究正在执行", "job_id": job_id}, datetime.now(timezone.utc))
-        from .web import run_research_payload  # lazy import avoids web/jobs cycle
+        from .service import run_research_payload  # lazy import avoids service/jobs cycle
         payload = dict(job["payload"])
         result = run_research_payload(payload, db_path=db_path, session_id=UUID(job["session_id"]))
         store.update_job(job_uuid, status="completed", run_id=UUID(result["run_id"]))

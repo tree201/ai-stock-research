@@ -1,7 +1,6 @@
 from unittest import TestCase
-from urllib.error import URLError
 
-from stock_research.web_search import DuckDuckGoSearch, _decode_redirect
+from stock_research.web_search import DuckDuckGoSearch, GoogleNewsSearch, _decode_redirect
 
 
 SAMPLE_HTML = (
@@ -39,12 +38,44 @@ class WebSearchTests(TestCase):
         )
 
     def test_search_returns_empty_on_network_failure(self) -> None:
-        def failing(*_args, **_kwargs):
-            raise URLError("boom")
+        def failing(_url: str) -> str:
+            raise OSError("boom")
 
-        search = DuckDuckGoSearch(opener=failing)
+        search = DuckDuckGoSearch(fetch=failing)
         self.assertEqual(search.search("CKH Holdings"), [])
 
     def test_search_returns_empty_for_blank_query(self) -> None:
         search = DuckDuckGoSearch()
         self.assertEqual(search.search("   "), [])
+
+
+SAMPLE_RSS = (
+    '<rss version="2.0"><channel>'
+    "<item><title>长江和记向巴拿马索赔逾15亿美元</title>"
+    "<link>https://news.google.com/rss/articles/abc</link>"
+    "<source>腾讯新闻</source><description>描述</description></item>"
+    "</channel></rss>"
+)
+
+
+class GoogleNewsTests(TestCase):
+    def test_parse_extracts_title_link_and_source(self) -> None:
+        results = GoogleNewsSearch._parse(SAMPLE_RSS)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].title, "长江和记向巴拿马索赔逾15亿美元")
+        self.assertEqual(results[0].url, "https://news.google.com/rss/articles/abc")
+        self.assertEqual(results[0].snippet, "腾讯新闻")
+
+    def test_parse_rejects_invalid_xml(self) -> None:
+        self.assertEqual(GoogleNewsSearch._parse("<not-xml"), [])
+
+    def test_search_returns_empty_on_network_failure(self) -> None:
+        def failing(_request, **_kwargs):
+            raise OSError("boom")
+
+        search = GoogleNewsSearch(opener=failing)
+        self.assertEqual(search.search("CKH"), [])
+
+    def test_search_returns_empty_for_blank_query(self) -> None:
+        search = GoogleNewsSearch()
+        self.assertEqual(search.search("  "), [])

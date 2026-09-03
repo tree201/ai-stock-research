@@ -264,7 +264,8 @@ class WebMvpTests(unittest.TestCase):
                 "document": "Revenue FY2024 HK$ 100 million",
             }, db_path=f"{directory}/research.sqlite3")
             with patch("stock_research.web._web_provider", return_value=FakeProvider()), \
-                 patch("stock_research.web.DuckDuckGoSearch", EmptySearch):
+                 patch("stock_research.web.DuckDuckGoSearch", EmptySearch), \
+                 patch("stock_research.web.GoogleNewsSearch", EmptySearch):
                 answer = chat_payload(UUID(report["session_id"]), "腾讯最新新闻", db_path=f"{directory}/research.sqlite3")
             self.assertEqual(answer["message"], "report answer")
 

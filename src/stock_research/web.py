@@ -23,7 +23,7 @@ from .storage import SQLiteStore
 from .workflow import ResearchWorkflow
 from .jobs import create_and_enqueue, queue_from_env
 from .hk_companies import list_hk_companies
-from .web_search import DuckDuckGoSearch
+from .web_search import DuckDuckGoSearch, GoogleNewsSearch
 
 
 HTML = r"""<!doctype html>
@@ -341,6 +341,13 @@ def _answer_follow_up(provider: Any, content: str, report_context: str, project:
     wants_search = any(word in lowered for word in _SEARCH_INTENT_WORDS)
     if wants_search and hasattr(provider, "answer_with_search"):
         results = DuckDuckGoSearch().search(f"{project.name} {project.symbol} {content}", max_results=5)
+        if not results:
+            # Google News RSS matches the user's own phrasing far better than
+            # the stored English company name, so try it first.
+            for candidate in (content, project.name):
+                results = GoogleNewsSearch().search(candidate, max_results=5)
+                if results:
+                    break
         if results:
             return provider.answer_with_search(
                 content,

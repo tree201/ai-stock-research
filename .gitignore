@@ -22,3 +22,7 @@ frontend/vite.config.d.ts
 
 # OS
 .DS_Store
+
+# Local working files
+.qwen/
+.qwen-*

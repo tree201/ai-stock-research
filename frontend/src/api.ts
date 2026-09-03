@@ -26,11 +26,13 @@ export const api = {
   createSession: (projectId: string, title = "新研究") => request<{ session_id: string; session: Session }>(`/api/projects/${projectId}/sessions`, { method: "POST", body: JSON.stringify({ title }) }),
   session: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),
   chat: (payload: Record<string, unknown>) => request<ChatResult>("/api/chat", { method: "POST", body: JSON.stringify(payload) }),
-  message: (id: string, content: string, asOfDate?: string, llm?: ModelSettings, documentUrls?: string) => request<ChatResult>(`/api/sessions/${id}/messages`, { method: "POST", body: JSON.stringify({ content, as_of_date: asOfDate, llm, document_urls: documentUrls }) }),
+  message: (id: string, content: string, llm?: ModelSettings) => request<ChatResult>(`/api/sessions/${id}/messages`, { method: "POST", body: JSON.stringify({ content, llm }) }),
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
   run: (id: string) => request<{ artifacts: { reports: { id: string }[] } }>(`/api/runs/${id}`),
   report: (id: string) => request<Report>(`/api/reports/${id}`),
   companyPanel: (symbol: string, market: string) => request<CompanyPanel>(`/api/company-panel?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`),
+  addCompanySource: (symbol: string, market: string, url: string, title?: string) => request<CompanyPanel>(`/api/company-panel/sources`, { method: "POST", body: JSON.stringify({ symbol, market, url, title }) }),
+  removeCompanySource: (sourceId: string) => request<{ ok: boolean }>(`/api/company-panel/sources/${sourceId}`, { method: "DELETE" }),
   quote: (symbol: string, market: string) => request<Quote>(`/api/quote/${encodeURIComponent(symbol)}?market=${encodeURIComponent(market)}`),
   news: (name: string, symbol: string) => request<NewsItem[]>(`/api/news?name=${encodeURIComponent(name)}&symbol=${encodeURIComponent(symbol)}`),
   settings: () => request<ModelSettings>('/api/settings'),
@@ -40,7 +42,8 @@ export const api = {
 export type ChatResult = { type: string; session_id: string; message?: string; report?: Report; job_id?: string; run_id?: string; report_id?: string };
 export type ModelSettings = { provider: string; base_url: string; model: string; api_key?: string; llm_enabled?: boolean; api_key_configured?: boolean };
 export type Quote = { available: boolean; symbol: string; delayed: boolean; currency?: string; last?: number; change?: number | null; change_pct?: number | null; high_52w?: number; low_52w?: number; as_of?: string };
+export type PanelSource = { id: string; url: string; title?: string | null; created_at: string };
 export type PanelDocument = { id: string; source_type: string; source_url: string; title: string; published_at?: string | null };
 export type PanelReport = { id: string; run_id: string; version: number; created_at: string; run_status?: string; question?: string };
-export type CompanyPanel = { available: boolean; project?: { id: string; name: string; symbol: string; market: string }; documents?: PanelDocument[]; reports?: PanelReport[] };
+export type CompanyPanel = { available: boolean; project?: { id: string; name: string; symbol: string; market: string }; sources?: PanelSource[]; documents?: PanelDocument[]; reports?: PanelReport[] };
 export type NewsItem = { title: string; url: string; source?: string };

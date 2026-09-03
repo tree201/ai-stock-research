@@ -81,6 +81,12 @@ class SQLiteStore:
                 document_id TEXT NOT NULL REFERENCES documents(id),
                 PRIMARY KEY(run_id, document_id)
             );
+            CREATE TABLE IF NOT EXISTS company_sources (
+                id TEXT PRIMARY KEY, company_id TEXT NOT NULL,
+                url TEXT NOT NULL, title TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(company_id, url)
+            );
             CREATE TABLE IF NOT EXISTS facts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL REFERENCES runs(id),
                 metric TEXT NOT NULL, value REAL NOT NULL, currency TEXT, unit TEXT,
@@ -555,6 +561,39 @@ class SQLiteStore:
             (str(company_id),),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def add_company_source(self, company_id: UUID, url: str, title: str | None = None) -> dict[str, Any]:
+        existing = self.connection.execute(
+            "SELECT * FROM company_sources WHERE company_id=? AND url=?", (str(company_id), url),
+        ).fetchone()
+        if existing:
+            return dict(existing)
+        row_id = str(uuid4())
+        self.connection.execute(
+            "INSERT INTO company_sources (id, company_id, url, title, created_at) VALUES (?,?,?,?,?)",
+            (row_id, str(company_id), url, title, _dt(datetime.now(timezone.utc))),
+        )
+        self.connection.commit()
+        row = self.connection.execute("SELECT * FROM company_sources WHERE id=?", (row_id,)).fetchone()
+        return dict(row)
+
+    def list_company_sources(self, company_id: UUID) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT id, url, title, created_at FROM company_sources WHERE company_id=? ORDER BY created_at DESC, id",
+            (str(company_id),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def remove_company_source(self, source_id: UUID) -> None:
+        self.connection.execute("DELETE FROM company_sources WHERE id=?", (str(source_id),))
+        self.connection.commit()
+
+    def list_company_source_urls(self, company_id: UUID) -> list[str]:
+        rows = self.connection.execute(
+            "SELECT url FROM company_sources WHERE company_id=? ORDER BY created_at, id",
+            (str(company_id),),
+        ).fetchall()
+        return [row["url"] for row in rows]
 
     def list_project_reports(self, project_id: UUID) -> list[dict[str, Any]]:
         rows = self.connection.execute(

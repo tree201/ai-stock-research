@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from .service import (
+    add_company_source,
     chat_entry_payload,
     chat_payload,
     configure_provider,
@@ -21,6 +22,7 @@ from .service import (
     create_session_for_project,
     history_payload,
     provider_status,
+    remove_company_source,
     run_research_payload,
     set_session_status,
 )
@@ -170,7 +172,7 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-        if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/projects"} and not self.path.startswith(("/api/projects/", "/api/sessions/")):
+        if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/projects"} and not self.path.startswith(("/api/projects/", "/api/sessions/", "/api/company-panel")):
             self._send(404, b'{"error":"not found"}', "application/json")
             return
         try:
@@ -193,12 +195,30 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
                 response = set_session_status(UUID(self.path.split("/")[3]), "active")
             elif self.path == "/api/research":
                 response = run_research_payload(payload)
+            elif self.path == "/api/company-panel/sources":
+                symbol = str(payload.get("symbol", "")).strip()
+                market = str(payload.get("market", "HK")).strip().upper() or "HK"
+                url = str(payload.get("url", "")).strip()
+                title = str(payload.get("title", "")).strip() or None
+                if not symbol or not url:
+                    raise ValueError("symbol and url are required")
+                response = add_company_source(symbol, market, url, title)
             elif self.path == "/api/chat":
                 response = chat_entry_payload(payload)
             else:
                 self._send(404, b'{"error":"not found"}', "application/json")
                 return
             self._send(200, json.dumps(response, ensure_ascii=False, default=str).encode("utf-8"), "application/json; charset=utf-8")
+        except Exception as exc:
+            self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+
+    def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
+        if not self.path.startswith("/api/company-panel/sources/"):
+            self._send(404, b'{"error":"not found"}', "application/json")
+            return
+        try:
+            remove_company_source(self.path.rsplit("/", 1)[-1])
+            self._send(200, b'{"ok": true}', "application/json; charset=utf-8")
         except Exception as exc:
             self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 

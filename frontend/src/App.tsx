@@ -529,9 +529,9 @@ function CompanyTree({
 const DEFAULT_SIDEBAR_WIDTH = 276;
 const DEFAULT_PANEL_WIDTH = 380;
 const SIDEBAR_MIN = 200;
-const SIDEBAR_MAX = 420;
+const SIDEBAR_MAX = 520;
 const PANEL_MIN = 300;
-const PANEL_MAX = 560;
+const PANEL_MAX = 720;
 
 function storedWidth(key: string, fallback: number, min: number, max: number) {
   const stored = Number(localStorage.getItem(key));

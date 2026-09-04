@@ -146,6 +146,28 @@ class SQLiteStore:
                 label TEXT,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS llm_providers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                base_url TEXT NOT NULL,
+                api_key TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                builtin INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS llm_models (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                provider_id INTEGER NOT NULL REFERENCES llm_providers(id) ON DELETE CASCADE,
+                model_id TEXT NOT NULL,
+                display_name TEXT,
+                thinking_levels TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(provider_id, model_id)
+            );
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """
         )
         columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(runs)").fetchall()}
@@ -161,6 +183,7 @@ class SQLiteStore:
             self.connection.execute("ALTER TABLE company_sources ADD COLUMN source_class TEXT DEFAULT 'private'")
         self._backfill_document_trust()
         self._seed_trusted_hosts()
+        self._seed_llm_catalog()
         self.connection.commit()
 
     # Legacy documents predate trust classification; backfill them once from
@@ -194,6 +217,160 @@ class SQLiteStore:
                 "INSERT OR IGNORE INTO trusted_hosts (host,label,created_at) VALUES (?,?,?)",
                 (host, label, _dt(datetime.now(timezone.utc))),
             )
+
+    def _seed_llm_catalog(self) -> None:
+        """Seed builtin domestic providers/models once; user edits survive."""
+        from .llm_catalog import BUILTIN_PROVIDERS, parse_thinking_levels
+
+        now = _dt(datetime.now(timezone.utc))
+        tombstones = set(self.get_setting("llm.deleted_models") or [])
+        for provider in BUILTIN_PROVIDERS:
+            cursor = self.connection.execute(
+                "INSERT OR IGNORE INTO llm_providers (name,base_url,api_key,enabled,builtin,created_at) VALUES (?,?,?,1,1,?)",
+                (provider["name"], provider["base_url"], None, now),
+            )
+            if cursor.rowcount:
+                provider_id = cursor.lastrowid
+            else:
+                row = self.connection.execute("SELECT id FROM llm_providers WHERE name=?", (provider["name"],)).fetchone()
+                provider_id = row["id"]
+            for model in provider["models"]:
+                if f"{provider['name']}:{model['model_id']}" in tombstones:
+                    continue
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO llm_models (provider_id,model_id,display_name,thinking_levels,enabled) VALUES (?,?,?,?,1)",
+                    (provider_id, model["model_id"], model["display_name"], _json(parse_thinking_levels(model["thinking_levels"]))),
+                )
+
+    # --- LLM provider/model hub -------------------------------------------------
+
+    def list_llm_providers(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT * FROM llm_providers ORDER BY builtin DESC, id ASC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_llm_provider(self, provider_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute("SELECT * FROM llm_providers WHERE id=?", (provider_id,)).fetchone()
+        return dict(row) if row else None
+
+    def add_llm_provider(self, name: str, base_url: str, api_key: str | None = None) -> dict[str, Any]:
+        name = name.strip()
+        base_url = base_url.strip().rstrip("/")
+        if not name or not base_url:
+            raise ValueError("name 和 base_url 必填")
+        now = _dt(datetime.now(timezone.utc))
+        cursor = self.connection.execute(
+            "INSERT INTO llm_providers (name,base_url,api_key,enabled,builtin,created_at) VALUES (?,?,?,1,0,?)",
+            (name, base_url, (api_key or "").strip() or None, now),
+        )
+        self.connection.commit()
+        return self.get_llm_provider(cursor.lastrowid)  # type: ignore[return-value]
+
+    def update_llm_provider(self, provider_id: int, *, name: str | None = None, base_url: str | None = None, api_key: str | None = None) -> dict[str, Any]:
+        current = self.get_llm_provider(provider_id)
+        if not current:
+            raise KeyError("供应商不存在")
+        fields: list[str] = []
+        values: list[Any] = []
+        if name is not None and name.strip():
+            fields.append("name=?")
+            values.append(name.strip())
+        if base_url is not None and base_url.strip():
+            fields.append("base_url=?")
+            values.append(base_url.strip().rstrip("/"))
+        if api_key is not None:
+            fields.append("api_key=?")
+            values.append(api_key.strip() or None)
+        if fields:
+            values.append(provider_id)
+            self.connection.execute(f"UPDATE llm_providers SET {', '.join(fields)} WHERE id=?", values)
+            self.connection.commit()
+        return self.get_llm_provider(provider_id)  # type: ignore[return-value]
+
+    def remove_llm_provider(self, provider_id: int) -> None:
+        self.connection.execute("DELETE FROM llm_models WHERE provider_id=?", (provider_id,))
+        self.connection.execute("DELETE FROM llm_providers WHERE id=?", (provider_id,))
+        selection = self.get_setting("llm.selection")
+        if selection and selection.get("provider_id") == provider_id:
+            self.connection.execute("DELETE FROM app_settings WHERE key='llm.selection'")
+        self.connection.commit()
+
+    def list_llm_models(self, provider_id: int | None = None) -> list[dict[str, Any]]:
+        if provider_id is None:
+            rows = self.connection.execute(
+                "SELECT * FROM llm_models ORDER BY provider_id, id ASC"
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM llm_models WHERE provider_id=? ORDER BY id ASC", (provider_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_llm_model(self, model_row_id: int) -> dict[str, Any] | None:
+        row = self.connection.execute("SELECT * FROM llm_models WHERE id=?", (model_row_id,)).fetchone()
+        return dict(row) if row else None
+
+    def add_llm_model(self, provider_id: int, model_id: str, display_name: str | None = None, thinking_levels: Any = None) -> dict[str, Any]:
+        from .llm_catalog import parse_thinking_levels
+
+        model_id = model_id.strip()
+        if not model_id:
+            raise ValueError("model_id 必填")
+        if not self.get_llm_provider(provider_id):
+            raise KeyError("供应商不存在")
+        levels = parse_thinking_levels(thinking_levels)
+        cursor = self.connection.execute(
+            "INSERT OR IGNORE INTO llm_models (provider_id,model_id,display_name,thinking_levels,enabled) VALUES (?,?,?,?,1)",
+            (provider_id, model_id, (display_name or "").strip() or None, _json(levels)),
+        )
+        if not cursor.rowcount:
+            raise ValueError("该供应商下已存在同名模型")
+        self._drop_model_tombstone(provider_id, model_id)
+        self.connection.commit()
+        return self.get_llm_model(cursor.lastrowid)  # type: ignore[return-value]
+
+    def _model_tombstone_key(self, provider_id: int, model_id: str) -> str | None:
+        provider = self.get_llm_provider(provider_id)
+        return f"{provider['name']}:{model_id}" if provider else None
+
+    def _drop_model_tombstone(self, provider_id: int, model_id: str) -> None:
+        key = self._model_tombstone_key(provider_id, model_id)
+        if not key:
+            return
+        tombstones = [entry for entry in (self.get_setting("llm.deleted_models") or []) if entry != key]
+        self.set_setting("llm.deleted_models", tombstones)
+
+    def remove_llm_model(self, model_row_id: int) -> None:
+        model = self.get_llm_model(model_row_id)
+        if model:
+            key = self._model_tombstone_key(int(model["provider_id"]), model["model_id"])
+            if key:
+                tombstones = (self.get_setting("llm.deleted_models") or []) + [key]
+                self.set_setting("llm.deleted_models", tombstones)
+        self.connection.execute("DELETE FROM llm_models WHERE id=?", (model_row_id,))
+        selection = self.get_setting("llm.selection")
+        if selection and selection.get("model_row_id") == model_row_id:
+            self.connection.execute("DELETE FROM app_settings WHERE key='llm.selection'")
+        self.connection.commit()
+
+    # --- generic kv settings (selection, recents) -------------------------------
+
+    def get_setting(self, key: str) -> Any:
+        row = self.connection.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["value"])
+        except (ValueError, TypeError):
+            return row["value"]
+
+    def set_setting(self, key: str, value: Any) -> None:
+        self.connection.execute(
+            "INSERT INTO app_settings (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, _json(value)),
+        )
+        self.connection.commit()
 
     def save_project(self, project: ResearchProject) -> None:
         self.connection.execute(

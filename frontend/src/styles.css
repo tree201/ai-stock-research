@@ -160,11 +160,23 @@ body { background:var(--paper); color:var(--ink); }
 .drag-handle:hover, body.is-resizing .drag-handle { background:#10a37f66; }
 body.is-resizing { cursor:col-resize; user-select:none; -webkit-user-select:none; }
 @media (max-width:760px) { .drag-handle { display:none; } }
-.composer { max-width:900px; border:1px solid var(--line); border-radius:15px; background:var(--surface); box-shadow:0 7px 24px #20342b0d; padding:13px 16px; transition:border-color .18s ease,box-shadow .18s ease; }
+.composer { max-width:900px; flex-wrap:wrap; border:1px solid var(--line); border-radius:15px; background:var(--surface); box-shadow:0 7px 24px #20342b0d; padding:13px 16px; transition:border-color .18s ease,box-shadow .18s ease; }
 .composer:focus-within { border-color:#8dc5b2; box-shadow:0 0 0 3px #17856e14,0 8px 26px #20342b12; }
-.composer textarea { color:var(--ink); font-size:14px; }
+.composer textarea { flex:1 1 100%; color:var(--ink); font-size:14px; }
 .composer textarea::placeholder { color:#9ba6a1; }
 .composer textarea:disabled { background:var(--surface); color:var(--ink-muted); }
+/* 输入框底栏：左=权限授权，右=模型选择+发送（对照 Trae composer 布局） */
+.composer-bar { flex:1 1 100%; display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:8px; }
+.composer-bar-right { display:flex; align-items:center; gap:4px; min-width:0; }
+.composer-bar .picker-trigger { height:30px; border:1px solid var(--line); border-radius:16px; background:var(--surface); padding:0 8px 0 10px; }
+.composer-bar .picker-trigger:hover:not(:disabled) { border-color:var(--signal); background:var(--surface); }
+.approval-trigger svg { color:var(--ink-soft); }
+.approval-trigger.approval-full, .approval-trigger.approval-full svg { color:var(--tag-warn-ink); }
+.approval-picker .picker-menu { left:0; right:auto; min-width:300px; }
+.approval-menu-head { padding:7px 8px 3px; color:var(--ink-soft); font-size:12px; line-height:18px; }
+.composer .send { flex:0 0 auto; display:grid; place-items:center; width:30px; height:30px; margin-left:4px; border:0; border-radius:50%; background:var(--signal); color:#fff; cursor:pointer; transition:opacity .15s; }
+.composer .send:hover:not(:disabled) { opacity:.88; }
+.composer .send:disabled { background:var(--surface-dim); color:var(--ink-muted); cursor:default; }
 .error-bar { max-width:900px; color:#a4583b; }
 .report-panel { background:var(--surface-soft); border-left-color:var(--line); }
 .report-panel-heading { background:var(--surface); border-bottom-color:var(--line); }

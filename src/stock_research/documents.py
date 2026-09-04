@@ -90,6 +90,7 @@ class HttpDocumentFetcher:
         allowed_hosts: Iterable[str] = ("www1.hkexnews.hk", "www.hkexnews.hk", "hkexnews.hk"),
         max_bytes: int = 25 * 1024 * 1024,
         user_agent: str = "ai-stock-research/0.1 (+document-fetcher)",
+        allow_any_host: bool = False,
     ) -> None:
         if max_bytes <= 0:
             raise ValueError("max_bytes must be positive")
@@ -97,13 +98,15 @@ class HttpDocumentFetcher:
         self._allowed_hosts = frozenset(host.lower() for host in allowed_hosts)
         self._max_bytes = max_bytes
         self._user_agent = user_agent
+        # 完全访问模式：跳过白名单校验（授权模式由 service 层决定）
+        self._allow_any_host = allow_any_host
 
     def fetch(self, url: str) -> FetchedDocument:
         parsed = urlparse(url)
         host = (parsed.hostname or "").lower()
         if parsed.scheme != "https":
             raise DocumentFetchError("document URLs must use https")
-        if host not in self._allowed_hosts:
+        if host not in self._allowed_hosts and not self._allow_any_host:
             raise DocumentFetchError(f"document host is not allowlisted: {host or '<missing>'}")
 
         request = Request(url, headers={"User-Agent": self._user_agent, "Accept": "text/html, application/pdf, text/plain"})

@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
 
-from .documents import FetchedDocument, HttpDocumentFetcher, PdfTextExtractor, RawDocument, UnsupportedDocumentType, extract_text
+from .documents import DocumentFetchError, FetchedDocument, HttpDocumentFetcher, PdfTextExtractor, RawDocument, UnsupportedDocumentType, extract_text
 from .domain import ResearchProject, ResearchSession, SessionMessage, utc_now
 from .facts import FactCandidate
 from .pipeline import ResearchPipeline
@@ -134,6 +134,32 @@ def document_hosts() -> tuple[str, ...]:
     return hosts
 
 
+# 抓取授权模式（输入框左下角权限选择器）：
+#   manual 手动审批 — 仅白名单域名（内置 HKEX + trusted_hosts）可抓取
+#   auto   自动审批 — 白名单自动抓取；用户消息中明确给出的链接视为已授权
+#   full   完全访问 — 任意来源自动抓取，不经审批
+APPROVAL_MODES = ("manual", "auto", "full")
+DEFAULT_APPROVAL_MODE = "manual"
+APPROVAL_SETTING_KEY = "llm.approval"
+
+
+def normalize_approval_mode(value: Any) -> str:
+    return value if value in APPROVAL_MODES else DEFAULT_APPROVAL_MODE
+
+
+def set_approval_mode_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """保存抓取授权模式；随 config 一并返回供前端刷新选择器。"""
+    mode = str(payload.get("mode", "")).strip()
+    if mode not in APPROVAL_MODES:
+        raise ValueError(f"未知授权模式：{mode or '<missing>'}")
+    store = SQLiteStore(database_path())
+    try:
+        store.set_setting(APPROVAL_SETTING_KEY, mode)
+        return {"ok": True, "config": llm_config_payload()}
+    finally:
+        store.close()
+
+
 def source_specs(payload: dict[str, Any]) -> list[dict[str, str]]:
     specs: list[dict[str, str]] = []
     raw_sources = payload.get("document_sources") or []
@@ -184,11 +210,30 @@ def research_documents(payload: dict[str, Any], company_id: UUID, as_of_date: da
         ))
     specs = source_specs(payload)
     if specs:
-        fetcher = HttpDocumentFetcher(allowed_hosts=document_hosts())
+        mode = normalize_approval_mode(store.get_setting(APPROVAL_SETTING_KEY) if store is not None else None)
+        whitelist = set(document_hosts())
+        if store is not None:
+            whitelist |= store.trusted_hosts_set()
+        fetcher = HttpDocumentFetcher(
+            allowed_hosts=sorted(whitelist),
+            allow_any_host=mode == "full",
+        )
         pdf_extractor = PdfTextExtractor()
         for spec in specs:
             url = spec["url"].strip()
-            fetched = fetcher.fetch(url)
+            try:
+                fetched = fetcher.fetch(url)
+            except DocumentFetchError as exc:
+                # auto 模式：用户消息中明确给出的链接视为已授权，白名单外放行重试一次
+                if mode != "auto" or "not allowlisted" not in str(exc):
+                    if mode == "manual" and "not allowlisted" in str(exc):
+                        host = (urlparse(url).hostname or "").lower()
+                        raise ValueError(
+                            f"来源 {host or url} 不在抓取白名单：请先在「公司详情 → 来源信任」添加，"
+                            "或将输入框左下角的权限授权切换为自动审批/完全访问"
+                        ) from exc
+                    raise
+                fetched = HttpDocumentFetcher(allowed_hosts=(), allow_any_host=True).fetch(url)
             page_starts: tuple[int, ...] = ()
             if fetched.content_type == "application/pdf" or fetched.body.startswith(b"%PDF"):
                 pages = pdf_extractor.extract_pages(fetched.body)
@@ -864,6 +909,7 @@ def llm_config_payload() -> dict[str, Any]:
         recent_ids = store.get_setting("llm.recent")
         if not isinstance(recent_ids, list):
             recent_ids = []
+        approval_mode = normalize_approval_mode(store.get_setting(APPROVAL_SETTING_KEY))
     finally:
         store.close()
 
@@ -911,6 +957,7 @@ def llm_config_payload() -> dict[str, Any]:
         "levels": [{"value": level, "label": LEVEL_LABELS[level]} for level in THINKING_LEVELS],
         "selection": current,
         "recent": recent,
+        "approval_mode": approval_mode,
     }
 
 

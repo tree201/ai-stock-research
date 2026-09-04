@@ -9,6 +9,7 @@ import {
 } from "react";
 import { App as AntdApp, Button, Badge, ConfigProvider, Dropdown, Modal, Select, Tabs, theme as antdTheme } from "antd";
 import { ANTD_THEME_TOKENS, ThemeName, applyTheme, initialTheme } from "./theme";
+import { ApprovalPicker } from "./ApprovalPicker";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -21,6 +22,7 @@ import {
   MessageSquare,
   Palette,
   Server,
+  ArrowUp,
   MoreHorizontal,
   Download,
   PanelLeftClose,
@@ -1422,11 +1424,6 @@ export default function App() {
               </button>
             </div>
           )}
-          <ModelPicker
-            config={llmConfig}
-            onConfigChange={setLlmConfig}
-            onOpenSettings={openSettings}
-          />
           <form className="composer" onSubmit={submit}>
             <textarea
               value={input}
@@ -1441,6 +1438,24 @@ export default function App() {
               placeholder="输入研究问题或追问……"
               rows={1}
             />
+            <div className="composer-bar">
+              <ApprovalPicker config={llmConfig} onConfigChange={setLlmConfig} />
+              <div className="composer-bar-right">
+                <ModelPicker
+                  config={llmConfig}
+                  onConfigChange={setLlmConfig}
+                  onOpenSettings={openSettings}
+                />
+                <button
+                  type="submit"
+                  className="send"
+                  disabled={busy || !!pendingJob || !input.trim()}
+                  aria-label="发送"
+                >
+                  <ArrowUp size={16} />
+                </button>
+              </div>
+            </div>
           </form>
         </div>
       </main>

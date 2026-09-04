@@ -133,7 +133,7 @@ export function ModelPicker({ config, onConfigChange, onOpenSettings }: Props) {
   };
 
   return (
-    <div ref={rootRef} className="picker-root" onKeyDown={onRootKeyDown} onBlur={onBlur}>
+    <div ref={rootRef} className="picker-root model-picker" onKeyDown={onRootKeyDown} onBlur={onBlur}>
       <button
         ref={triggerRef}
         type="button"

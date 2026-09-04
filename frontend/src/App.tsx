@@ -495,6 +495,7 @@ function CompanyTree({
                   <strong>{company.name}</strong>
                   <Dropdown
                     trigger={["click"]}
+                    overlayClassName="company-more-dropdown"
                     menu={{
                       items: [
                         {

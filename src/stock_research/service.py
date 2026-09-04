@@ -585,16 +585,25 @@ def news_payload(name: str, symbol: str) -> list[dict[str, Any]]:
             continue
         results = GoogleNewsSearch().search(candidate.strip(), max_results=8)
         if results:
-            return [
-                {
-                    "title": item.title,
-                    "url": item.url,
-                    "source": item.snippet,
-                    "time": item.published,
-                }
-                for item in results
-            ]
+            return [_news_item(item) for item in results]
     return []
+
+
+def _news_item(item: Any) -> dict[str, Any]:
+    """Resolve Google News redirects upfront and flag unresolvable ones.
+
+    Old-format redirect IDs resolve to the publisher URL and stay readable
+    in-app; new-format IDs cannot be resolved server-side, so they are marked
+    ``external`` and the UI opens them directly in a new tab.
+    """
+    resolved = resolve_google_news_url(item.url)
+    return {
+        "title": item.title,
+        "url": resolved,
+        "source": item.snippet,
+        "time": item.published,
+        "external": "news.google.com" in urlparse(resolved).netloc,
+    }
 
 
 def resolve_google_news_url(url: str) -> str:

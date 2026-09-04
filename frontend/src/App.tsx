@@ -1399,8 +1399,19 @@ export default function App() {
                           <button
                             className="news-card"
                             key={`${item.url}-${index}`}
-                            onClick={() => void openArticle(item)}
+                            onClick={() => {
+                              if (item.external) {
+                                window.open(item.url, "_blank", "noopener");
+                                return;
+                              }
+                              void openArticle(item);
+                            }}
                           >
+                            {item.external && (
+                              <span className="news-external-tag">
+                                <ExternalLink size={10} /> 站外
+                              </span>
+                            )}
                             <span className="news-title">{item.title}</span>
                             <span className="news-meta">
                               {item.source && (

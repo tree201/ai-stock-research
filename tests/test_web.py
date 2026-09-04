@@ -483,7 +483,10 @@ class WebMvpTests(unittest.TestCase):
                     SearchResult(
                         title="t", url="https://example.com", snippet="s",
                         published="Thu, 03 Sep 2026 21:15:00 GMT",
-                    )
+                    ),
+                    SearchResult(
+                        title="g", url="https://news.google.com/rss/articles/CBMiU0FVX3lxTE9YU3I4M0w2WnNYSUNNLWZCRENHY1ct?oc=5", snippet="s",
+                    ),
                 ]
 
         fake = FakeNews()
@@ -491,6 +494,9 @@ class WebMvpTests(unittest.TestCase):
             news = history_payload("/api/news?name=CKH%20HOLDINGS&symbol=00001")
         self.assertEqual(news[0]["url"], "https://example.com")
         self.assertEqual(news[0]["time"], "Thu, 03 Sep 2026 21:15:00 GMT")
+        self.assertFalse(news[0]["external"])
+        self.assertTrue(news[1]["external"])
+        self.assertIn("news.google.com", news[1]["url"])
         self.assertEqual(fake.query, "CKH HOLDINGS 最新")
 
     def test_article_endpoint_extracts_readable_text(self) -> None:

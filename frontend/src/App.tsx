@@ -1,4 +1,12 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  CSSProperties,
+  FormEvent,
+  PointerEvent as ReactPointerEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Button, Badge, Modal, Select, Tabs } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -505,9 +513,29 @@ function CompanyTree({
   );
 }
 
+const DEFAULT_SIDEBAR_WIDTH = 276;
+const DEFAULT_PANEL_WIDTH = 380;
+const SIDEBAR_MIN = 200;
+const SIDEBAR_MAX = 420;
+const PANEL_MIN = 300;
+const PANEL_MAX = 560;
+
+function storedWidth(key: string, fallback: number, min: number, max: number) {
+  const stored = Number(localStorage.getItem(key));
+  return Number.isFinite(stored) && stored >= min && stored <= max
+    ? stored
+    : fallback;
+}
+
 export default function App() {
   const [companies, setCompanies] = useState<Company[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() =>
+    storedWidth("sidebarWidth", DEFAULT_SIDEBAR_WIDTH, SIDEBAR_MIN, SIDEBAR_MAX),
+  );
+  const [panelWidth, setPanelWidth] = useState(() =>
+    storedWidth("panelWidth", DEFAULT_PANEL_WIDTH, PANEL_MIN, PANEL_MAX),
+  );
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
@@ -576,6 +604,47 @@ export default function App() {
   const [companyCatalogLoading, setCompanyCatalogLoading] = useState(false);
   const [companyCatalogLoaded, setCompanyCatalogLoaded] = useState(false);
   const [newResearchBusy, setNewResearchBusy] = useState(false);
+
+  useEffect(() => {
+    localStorage.setItem("sidebarWidth", String(sidebarWidth));
+  }, [sidebarWidth]);
+  useEffect(() => {
+    localStorage.setItem("panelWidth", String(panelWidth));
+  }, [panelWidth]);
+
+  function beginResize(side: "left" | "right", event: React.PointerEvent) {
+    event.preventDefault();
+    const start = {
+      side,
+      startX: event.clientX,
+      startWidth: side === "left" ? sidebarWidth : panelWidth,
+    };
+    document.body.classList.add("is-resizing");
+    const onMove = (ev: PointerEvent) => {
+      const delta =
+        start.side === "left"
+          ? ev.clientX - start.startX
+          : start.startX - ev.clientX;
+      if (start.side === "left") {
+        setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, start.startWidth + delta)));
+      } else {
+        setPanelWidth(Math.min(PANEL_MAX, Math.max(PANEL_MIN, start.startWidth + delta)));
+      }
+    };
+    const onUp = () => {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.body.classList.remove("is-resizing");
+    };
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  }
+
+  const shellStyle = {
+    "--sidebar-width": `${sidebarCollapsed ? 62 : sidebarWidth}px`,
+    "--composer-offset": sidebarCollapsed ? "0px" : "-28px",
+    "--panel-width": `${panelWidth}px`,
+  } as CSSProperties;
 
   const openSettings = () => {
     setModelSettingsOpen(true);
@@ -1037,7 +1106,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" style={shellStyle}>
       <aside className={`sidebar ${sidebarCollapsed ? "is-collapsed" : ""}`}>
         <div className="workspace-switcher">
           <div className="workspace-copy">
@@ -1116,6 +1185,14 @@ export default function App() {
           </button>
         </div>
       </aside>
+      {!sidebarCollapsed && (
+        <div
+          className="drag-handle drag-handle-left"
+          title="拖拽调整宽度，双击复位"
+          onPointerDown={(e) => beginResize("left", e)}
+          onDoubleClick={() => setSidebarWidth(DEFAULT_SIDEBAR_WIDTH)}
+        />
+      )}
       <main className="main-shell">
         <header className="topbar">
           <h1>{companyName || "开始一段研究"}</h1>
@@ -1184,11 +1261,7 @@ export default function App() {
           </section>
         </div>
         <div
-          className="composer-wrap"
-          style={{
-            left: sidebarCollapsed ? 62 : undefined,
-            right: panelOpen ? 380 : undefined,
-          }}
+          className={`composer-wrap ${panelOpen ? "panel-open" : ""}`}
         >
           {error && (
             <div className="error-bar">
@@ -1216,7 +1289,14 @@ export default function App() {
         </div>
       </main>
       {panelOpen && (
-        <aside className="company-panel">
+        <>
+          <div
+            className="drag-handle drag-handle-right"
+            title="拖拽调整宽度，双击复位"
+            onPointerDown={(e) => beginResize("right", e)}
+            onDoubleClick={() => setPanelWidth(DEFAULT_PANEL_WIDTH)}
+          />
+          <aside className="company-panel">
           <div className="report-panel-heading">
             <div>
               <strong>{panelCompany?.name || companyName || "公司档案"}</strong>
@@ -1510,6 +1590,7 @@ export default function App() {
             />
           </div>
         </aside>
+        </>
       )}
       <Modal
         open={!!reportViewer}

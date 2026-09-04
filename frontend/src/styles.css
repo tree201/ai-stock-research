@@ -1,7 +1,7 @@
 :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #202123; background: #fff; font-synthesis: none; }
 * { box-sizing: border-box; } html, body, #root { height:100%; } body { margin: 0; min-width: 320px; overflow:hidden; } button, textarea, input { font: inherit; } button { cursor: pointer; }
 .app-shell { height:100vh; min-height:0; display: flex; overflow:hidden; background: #fff; }
-.sidebar { width: 276px; height:100%; flex: 0 0 276px; background: #242424; border-right: 1px solid #383838; display:flex; flex-direction:column; padding: 11px 10px; color:#f3f3f3; }
+.sidebar { width: var(--sidebar-width, 276px); flex: 0 0 var(--sidebar-width, 276px); height:100%; background: #242424; border-right: 1px solid #383838; display:flex; flex-direction:column; padding: 11px 10px; color:#f3f3f3; }
 .sidebar.is-collapsed { width:62px; flex-basis:62px; padding-left:6px; padding-right:6px; } .sidebar.is-collapsed .workspace-switcher { justify-content:center; padding:5px; } .sidebar.is-collapsed .workspace-copy,.sidebar.is-collapsed .workspace-more { display:none; } .sidebar.is-collapsed .workspace-mark { flex:0 0 28px; } .sidebar.is-collapsed .company-scroll { display:none; }
 .workspace-switcher { height:45px; display:flex; align-items:center; gap:9px; padding:5px 8px; border:1px solid #484848; border-radius:10px; background:#2d2d2d; box-shadow:0 1px 0 #ffffff08 inset; } .workspace-mark { width:26px; height:26px; display:flex; align-items:center; justify-content:center; border-radius:7px; background:#3a695c; color:#d9fff3; } .workspace-copy { min-width:0; flex:1; display:flex; flex-direction:column; gap:1px; } .workspace-copy strong { font-size:12px; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .workspace-copy small { color:#9d9d9d; font-size:10px; } .workspace-more { color:#9c9c9c; font-size:14px; letter-spacing:1px; }
 .sidebar-collapse { display:flex; align-items:center; justify-content:center; border:0; background:transparent; color:#999; padding:3px; } .sidebar-collapse:hover { color:#eee; }
@@ -127,7 +127,12 @@ body { background:var(--paper); color:var(--ink); }
 .message-row { margin-bottom:28px; }
 .message-bubble { color:#2a3530; font-size:14px; line-height:1.75; }
 .message-row.is-user .message-bubble { background:#e9efec; color:#20332b; border:1px solid #d9e3de; border-radius:14px 14px 4px 14px; padding:11px 16px; }
-.composer-wrap { left:248px; padding:22px 32px 18px; background:linear-gradient(transparent,var(--paper) 28%); }
+.composer-wrap { left: calc(var(--sidebar-width, 276px) + var(--composer-offset, 0px)); padding:22px 32px 18px; background:linear-gradient(transparent,var(--paper) 28%); }
+.composer-wrap.panel-open { right: var(--panel-width, 380px); }
+.drag-handle { flex:0 0 6px; width:6px; cursor:col-resize; background:transparent; transition:background .15s; z-index:5; }
+.drag-handle:hover, body.is-resizing .drag-handle { background:#10a37f2e; }
+body.is-resizing { cursor:col-resize; user-select:none; -webkit-user-select:none; }
+@media (max-width:760px) { .drag-handle { display:none; } }
 .composer { max-width:900px; border:1px solid #cbd6d0; border-radius:15px; background:#fff; box-shadow:0 7px 24px #20342b0d; padding:13px 16px; transition:border-color .18s ease,box-shadow .18s ease; }
 .composer:focus-within { border-color:#8dc5b2; box-shadow:0 0 0 3px #17856e14,0 8px 26px #20342b12; }
 .composer textarea { color:var(--ink); font-size:14px; }
@@ -171,7 +176,7 @@ body { background:var(--paper); color:var(--ink); }
 @media (max-width:760px) { .sidebar { width:58px; flex-basis:58px; padding:12px 6px; } .composer-wrap { left:58px; padding:18px 12px 14px; } .topbar { padding:0 16px; } .thread { padding-left:16px; padding-right:16px; } }
 
 /* Company panel (right rail) */
-.company-panel { width:380px; flex:0 0 380px; height:100vh; display:flex; flex-direction:column; border-left:1px solid var(--line); background:#f5f7f4; }
+.company-panel { width: var(--panel-width, 380px); flex: 0 0 var(--panel-width, 380px); height:100vh; display:flex; flex-direction:column; border-left:1px solid var(--line); background:#f5f7f4; }
 .company-panel-body { flex:1; min-height:0; overflow-y:auto; }
 .company-panel .ant-tabs { padding:0 10px; }
 .company-panel .ant-tabs-nav { margin-bottom:10px; }

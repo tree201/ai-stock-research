@@ -493,9 +493,6 @@ function CompanyTree({
               >
                 <span className="company-title">
                   <strong>{company.name}</strong>
-                  <span className="company-symbol">{company.symbol}</span>
-                  <span className="company-market">{company.market}</span>
-                  <em>{company.session_count}</em>
                   <Dropdown
                     trigger={["click"]}
                     menu={{

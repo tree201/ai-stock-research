@@ -12,6 +12,7 @@ from .documents import DocumentIngestor, EvidenceChunk, RawDocument
 from .facts import FactCandidate, FinancialFactExtractor
 from .report import ReportBuilder
 from .llm import AnalysisRequest, LLMProvider
+from .trust import trust_label
 from .workflow import ResearchWorkflow
 
 
@@ -62,9 +63,11 @@ class ResearchPipeline:
 
         chunks = []
         evidence_sources = {}
+        trust_by_document: dict[str, str | None] = {}
         if "collect_filings" in completed:
             chunks = [self._chunk_from_row(row) for row in artifacts.get("evidence", [])]
             documents_by_id = {row["id"]: row for row in artifacts.get("documents", [])}
+            trust_by_document = {row["id"]: row.get("trust") for row in artifacts.get("documents", [])}
             evidence_sources = {
                 str(chunk.id): {
                     "source_url": documents_by_id.get(str(chunk.document_id), {}).get("source_url", ""),
@@ -79,11 +82,14 @@ class ResearchPipeline:
             self.workflow.start_next_step(run.id)
             chunks = self.document_ingestor.chunk_many(documents)
             documents_by_id = {document.id: document for document in documents}
+            trust_by_document = {str(document.id): document.trust for document in documents}
             evidence_sources = {
                 str(chunk.id): {
                     "source_url": documents_by_id[chunk.document_id].source_url,
                     "source_title": documents_by_id[chunk.document_id].title,
                     "page": chunk.page,
+                    "source_class": documents_by_id[chunk.document_id].source_class,
+                    "trust": documents_by_id[chunk.document_id].trust,
                 }
                 for chunk in chunks
                 if chunk.document_id in documents_by_id
@@ -112,7 +118,14 @@ class ResearchPipeline:
         else:
             if self.llm_provider:
                 selected_chunks = self.context_builder.select(chunks, question)
-                evidence = tuple({"evidence_id": str(chunk.id), "text": chunk.text} for chunk in selected_chunks)
+                evidence = tuple(
+                    {
+                        "evidence_id": str(chunk.id),
+                        "text": chunk.text,
+                        "trust": trust_label(trust_by_document.get(str(chunk.document_id))),
+                    }
+                    for chunk in selected_chunks
+                )
                 llm_evidence_count = len(evidence)
                 analysis = self.llm_provider.analyze(AnalysisRequest(question, as_of_date, evidence))
                 llm_usage = analysis.usage

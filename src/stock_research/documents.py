@@ -24,6 +24,8 @@ class RawDocument:
     period_start: date | None = None
     period_end: date | None = None
     language: str | None = None
+    source_class: str | None = None
+    trust: str | None = None
     id: UUID = field(default_factory=uuid4)
     page_starts: tuple[int, ...] = ()
 

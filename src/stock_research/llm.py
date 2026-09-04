@@ -98,12 +98,19 @@ class OpenAICompatibleProvider:
         self.timeout = timeout
 
     def analyze(self, request: AnalysisRequest) -> AnalysisResponse:
-        evidence_text = "\n".join(f"[{item.get('evidence_id')}] {item.get('text', '')}" for item in request.evidence)
+        evidence_text = "\n".join(
+            f"[{item.get('evidence_id')}]{(' ' + item['trust']) if item.get('trust') else ''} {item.get('text', '')}"
+            for item in request.evidence
+        )
         instruction = (
             "You are a financial research analyst. Return JSON only in the shape "
             '{"claims":[{"category":"business|risk|industry","text":"...",'
             '"evidence_ids":["..."],"confidence":0.0,"counter_evidence_ids":[]}]}.'
             " Do not invent facts. Every claim must cite one or more supplied evidence IDs. "
+            "Evidence items carry a source-trust tag: [私有已验证] = user-verified private material, "
+            "[白名单来源] = whitelisted public source, [未验证来源] = unverified web source. "
+            "Prefer higher-trust evidence; say so explicitly when a claim relies on [未验证来源]; "
+            "when evidence conflicts, trust private material over public web sources. "
             f"Research cutoff: {request.as_of_date.isoformat()}. Question: {request.question}\n"
             f"Evidence:\n{evidence_text}"
         )
@@ -180,13 +187,16 @@ class OpenAICompatibleProvider:
     def answer_with_search(self, question: str, search_results: list[dict[str, str]], report_context: str = "") -> str:
         """Answer a follow-up using web search snippets plus report context."""
         sources = "\n".join(
-            f"[{index}] {item.get('title', '')}\n{item.get('url', '')}\n{item.get('snippet', '')}"
+            f"[{index}]{(' ' + item['trust']) if item.get('trust') else ''} {item.get('title', '')}\n{item.get('url', '')}\n{item.get('snippet', '')}"
             for index, item in enumerate(search_results, 1)
         )
         prompt = (
             "你是严谨的股票研究助手。请结合联网搜索结果回答用户追问。"
             "只使用提供的搜索摘要和历史报告信息，不要编造数字；信息不足时明确说明。"
-            "涉及数字时保留原有单位。回答末尾用 Markdown 列出参考来源链接（[标题](URL)）。\n\n"
+            "涉及数字时保留原有单位。"
+            "搜索结果带有可信度标注：[白名单来源] 表示来自可信白名单域名，[未验证来源] 表示未经核实的网络来源。"
+            "优先引用可信来源；引用未验证来源时必须注明「据未经核实的网络来源」。"
+            "回答末尾用 Markdown 列出参考来源链接（[标题](URL)），并为每条来源标注可信度。\n\n"
             f"历史研究报告：\n{report_context[:12000]}\n\n"
             f"联网搜索结果：\n{sources}\n\n"
             f"用户追问：{question}"

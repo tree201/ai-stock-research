@@ -32,6 +32,7 @@ import {
   Run,
   SearchResult,
   Session,
+  TrustedHost,
 } from "./api";
 
 function relativeTime(value?: string | null): string {
@@ -46,6 +47,17 @@ function relativeTime(value?: string | null): string {
   const days = Math.floor(hours / 24);
   if (days < 30) return `${days} 天前`;
   return new Date(ts).toLocaleDateString("zh-CN");
+}
+
+const TRUST_BADGES: Record<string, { label: string; className: string }> = {
+  verified: { label: "私有", className: "trust-tag trust-private" },
+  whitelist: { label: "可信", className: "trust-tag trust-whitelist" },
+  unverified: { label: "未验证", className: "trust-tag trust-unverified" },
+};
+
+function TrustBadge({ trust }: { trust?: string | null }) {
+  const badge = TRUST_BADGES[trust || "unverified"] || TRUST_BADGES.unverified;
+  return <span className={badge.className}>{badge.label}</span>;
 }
 
 function MessageBubble({ message }: { message: Message }) {
@@ -277,6 +289,7 @@ function ReportCard({
                 <span>{fact.period_end || "-"}</span>
                 <span>{fact.confidence.toFixed(2)}</span>
                 <span className="fact-source">
+                  <TrustBadge trust={fact.citation.trust} />
                   {fact.citation.source_url ? (
                     <a
                       href={fact.citation.source_url}
@@ -560,7 +573,11 @@ export default function App() {
     symbol: "00700",
   });
   const [newSourceUrl, setNewSourceUrl] = useState("");
+  const [newSourceClass, setNewSourceClass] = useState("private");
   const [sourceBusy, setSourceBusy] = useState(false);
+  const [trustedHosts, setTrustedHosts] = useState<TrustedHost[]>([]);
+  const [newTrustedHost, setNewTrustedHost] = useState("");
+  const [hostBusy, setHostBusy] = useState(false);
   const [modelSettings, setModelSettings] = useState<ModelSettings>({
     provider: "deepseek",
     base_url: "https://api.deepseek.com/v1",
@@ -715,6 +732,14 @@ export default function App() {
   }, [panelOpen, panelCompany?.symbol, panelCompany?.market]);
 
   useEffect(() => {
+    if (!panelOpen) return;
+    api
+      .trustedHosts()
+      .then((data) => setTrustedHosts(data.hosts || []))
+      .catch(() => setTrustedHosts([]));
+  }, [panelOpen]);
+
+  useEffect(() => {
     if (!panelOpen || panelTab !== "news" || !panelCompany || newsItems) return;
     void loadNews(panelCompany);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -860,6 +885,31 @@ export default function App() {
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "资料源移除失败");
+    }
+  }
+
+  async function addTrustedHost() {
+    const host = newTrustedHost.trim();
+    if (!host) return;
+    setHostBusy(true);
+    try {
+      const updated = await api.addTrustedHost(host);
+      setTrustedHosts(updated.hosts || []);
+      setNewTrustedHost("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "白名单添加失败");
+    } finally {
+      setHostBusy(false);
+    }
+  }
+
+  async function removeTrustedHost(id: number) {
+    try {
+      await api.removeTrustedHost(id);
+      const listing = await api.trustedHosts();
+      setTrustedHosts(listing.hosts || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "白名单移除失败");
     }
   }
 
@@ -1326,6 +1376,16 @@ export default function App() {
                             }
                           }}
                         />
+                        <Select
+                          size="small"
+                          value={newSourceClass}
+                          onChange={(value) => setNewSourceClass(value)}
+                          style={{ width: 76 }}
+                          options={[
+                            { value: "private", label: "私有" },
+                            { value: "public", label: "公有" },
+                          ]}
+                        />
                         <button
                           disabled={
                             sourceBusy || !panelCompany || !newSourceUrl.trim()
@@ -1336,8 +1396,7 @@ export default function App() {
                         </button>
                       </div>
                       <div className="panel-hint">
-                        登记后会在每次研究时自动抓取（仅支持 HKEX
-                        等已授权公开域名）。
+                        私有来源视为已人工确认；公有来源按可信域名白名单判定。
                       </div>
                       {(panelData?.sources?.length ?? 0) > 0 ? (
                         panelData!.sources!.map((source) => (
@@ -1351,6 +1410,13 @@ export default function App() {
                             >
                               {source.title || source.url}
                             </a>
+                            <TrustBadge
+                              trust={
+                                source.source_class === "public"
+                                  ? "unverified"
+                                  : "verified"
+                              }
+                            />
                             <button
                               className="source-remove"
                               aria-label="移除资料源"
@@ -1380,6 +1446,7 @@ export default function App() {
                           >
                             <FileText size={13} />
                             <span className="doc-title">{doc.title}</span>
+                            <TrustBadge trust={doc.trust} />
                             <small>
                               {doc.published_at
                                 ? doc.published_at.slice(0, 10)
@@ -1392,6 +1459,46 @@ export default function App() {
                           暂无归档文档。研究完成后抓取的资料会沉淀在这里。
                         </div>
                       )}
+                      <details className="host-whitelist">
+                        <summary className="panel-subtitle">
+                          可信域名白名单（{trustedHosts.length}）
+                        </summary>
+                        <div className="panel-hint">
+                          白名单域名的公有资料标记为「可信」；仅影响之后入库的资料。
+                        </div>
+                        <div className="source-add">
+                          <input
+                            value={newTrustedHost}
+                            placeholder="example.com"
+                            onChange={(e) => setNewTrustedHost(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                void addTrustedHost();
+                              }
+                            }}
+                          />
+                          <button
+                            disabled={hostBusy || !newTrustedHost.trim()}
+                            onClick={() => void addTrustedHost()}
+                          >
+                            {hostBusy ? "添加中…" : "添加"}
+                          </button>
+                        </div>
+                        {trustedHosts.map((host) => (
+                          <div className="source-item" key={host.id}>
+                            <span className="doc-title">{host.host}</span>
+                            <button
+                              className="source-remove"
+                              aria-label="移除白名单域名"
+                              disabled={hostBusy}
+                              onClick={() => void removeTrustedHost(host.id)}
+                            >
+                              ×
+                            </button>
+                          </div>
+                        ))}
+                      </details>
                     </div>
                   ),
                 },
@@ -1474,10 +1581,12 @@ export default function App() {
                                 void openArticle(item);
                               }}
                             >
-                              {item.external && (
+                              {item.external ? (
                                 <span className="news-external-tag">
                                   <ExternalLink size={10} /> 站外
                                 </span>
+                              ) : (
+                                <TrustBadge trust={item.trust} />
                               )}
                               <span className="news-title">{item.title}</span>
                               <span className="news-meta">

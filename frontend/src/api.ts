@@ -9,7 +9,8 @@ export type SessionDetail = { session: Session; messages: Message[]; runs: Run[]
 export type Job = { id: string; session_id: string; run_id?: string; status: "queued" | "running" | "completed" | "failed" | "canceled" | string; attempts: number; error?: { message?: string } };
 export type Report = { report_id: string; company: { name: string; symbol: string }; summary: string[]; markdown: string; facts: Fact[]; calculations: Calculation[]; recalculated_from?: string; version?: number; diff?: ReportDiff; update_of?: string };
 export type ReportDiff = { previous_report_id?: string; new_facts?: Fact[]; changed_facts?: { metric: string; period_end?: string | null; previous_value: number; current_value: number }[]; valuation?: { previous: number; current: number; change_pct: number } | null; conclusion_changed?: boolean };
-export type Fact = { metric: string; value: number; currency?: string; period_end?: string; confidence: number; citation: { source_line: number; raw_text: string; page?: number; source_url?: string } };
+export type Fact = { metric: string; value: number; currency?: string; period_end?: string; confidence: number; citation: { source_line: number; raw_text: string; page?: number; source_url?: string; trust?: string | null } };
+export type SourceTrust = "verified" | "whitelist" | "unverified" | string;
 export type Calculation = { calculation_type: string; inputs: Record<string, unknown>; outputs: Record<string, number>; };
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -33,8 +34,11 @@ export const api = {
   report: (id: string) => request<Report>(`/api/reports/${id}`),
   recalculateReport: (reportId: string, assumptions: Record<string, number | number[]>) => request<Report>(`/api/reports/${reportId}/recalculate`, { method: "POST", body: JSON.stringify({ dcf_assumptions: assumptions }) }),
   companyPanel: (symbol: string, market: string) => request<CompanyPanel>(`/api/company-panel?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`),
-  addCompanySource: (symbol: string, market: string, url: string, title?: string) => request<CompanyPanel>(`/api/company-panel/sources`, { method: "POST", body: JSON.stringify({ symbol, market, url, title }) }),
+  addCompanySource: (symbol: string, market: string, url: string, title?: string, sourceClass?: string) => request<CompanyPanel>(`/api/company-panel/sources`, { method: "POST", body: JSON.stringify({ symbol, market, url, title, source_class: sourceClass || "private" }) }),
   removeCompanySource: (sourceId: string) => request<{ ok: boolean }>(`/api/company-panel/sources/${sourceId}`, { method: "DELETE" }),
+  trustedHosts: () => request<TrustedHostList>("/api/trusted-hosts"),
+  addTrustedHost: (host: string, label?: string) => request<TrustedHostList & { host: TrustedHost }>("/api/trusted-hosts", { method: "POST", body: JSON.stringify({ host, label }) }),
+  removeTrustedHost: (id: number) => request<{ ok: boolean }>(`/api/trusted-hosts/${id}`, { method: "DELETE" }),
   quote: (symbol: string, market: string) => request<Quote>(`/api/quote/${encodeURIComponent(symbol)}?market=${encodeURIComponent(market)}`),
   news: (name: string, symbol: string, q?: string) => request<NewsItem[]>(`/api/news?name=${encodeURIComponent(name)}&symbol=${encodeURIComponent(symbol)}${q ? `&q=${encodeURIComponent(q)}` : ""}`),
   article: (url: string) => request<ArticleReader>(`/api/article?url=${encodeURIComponent(url)}`),
@@ -45,9 +49,11 @@ export const api = {
 export type ChatResult = { type: string; session_id: string; message?: string; report?: Report; job_id?: string; run_id?: string; report_id?: string };
 export type ModelSettings = { provider: string; base_url: string; model: string; api_key?: string; llm_enabled?: boolean; api_key_configured?: boolean };
 export type Quote = { available: boolean; symbol: string; delayed: boolean; currency?: string; last?: number; change?: number | null; change_pct?: number | null; high_52w?: number; low_52w?: number; as_of?: string };
-export type PanelSource = { id: string; url: string; title?: string | null; created_at: string };
-export type PanelDocument = { id: string; source_type: string; source_url: string; title: string; published_at?: string | null };
+export type PanelSource = { id: string; url: string; title?: string | null; created_at: string; source_class?: string | null };
+export type PanelDocument = { id: string; source_type: string; source_url: string; title: string; published_at?: string | null; source_class?: string | null; trust?: string | null };
 export type PanelReport = { id: string; run_id: string; version: number; created_at: string; run_status?: string; question?: string };
 export type CompanyPanel = { available: boolean; project?: { id: string; name: string; symbol: string; market: string }; sources?: PanelSource[]; documents?: PanelDocument[]; reports?: PanelReport[] };
-export type NewsItem = { title: string; url: string; source?: string; time?: string | null; external?: boolean };
+export type NewsItem = { title: string; url: string; source?: string; time?: string | null; external?: boolean; trust?: string | null };
+export type TrustedHost = { id: number; host: string; label?: string | null; created_at: string };
+export type TrustedHostList = { hosts: TrustedHost[] };
 export type ArticleReader = { ok: boolean; url: string; text: string };

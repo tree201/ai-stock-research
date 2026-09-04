@@ -10,7 +10,7 @@ import json
 import re
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
@@ -22,6 +22,7 @@ from .pipeline import ResearchPipeline
 from .report import ReportBuilder, diff_reports
 from .llm import LLMError, ModelNotConfiguredError, provider_from_config, provider_from_env
 from .storage import SQLiteStore
+from .trust import DEFAULT_TRUSTED_HOSTS, classify_document, host_in_set
 from .workflow import ResearchWorkflow
 from .jobs import create_and_enqueue
 from .hk_companies import list_hk_companies
@@ -126,8 +127,13 @@ def parse_published_at(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def research_documents(payload: dict[str, Any], company_id: UUID, as_of_date: date) -> list[RawDocument]:
+def research_documents(payload: dict[str, Any], company_id: UUID, as_of_date: date, store: SQLiteStore | None = None) -> list[RawDocument]:
     documents: list[RawDocument] = []
+    # Trust is judged once at ingestion from the registered source class and
+    # the trusted-host whitelist, then persisted with the document.
+    registered_classes: dict[str, str] = store.company_source_classes(company_id) if store is not None else {}
+    trusted_hosts = store.trusted_hosts_set() if store is not None else DEFAULT_TRUSTED_HOSTS
+    checker = store.is_trusted_host if store is not None else (lambda host: host_in_set(host, trusted_hosts))
     if payload.get("document"):
         documents.append(RawDocument(
             company_id=company_id,
@@ -136,6 +142,8 @@ def research_documents(payload: dict[str, Any], company_id: UUID, as_of_date: da
             title="user document",
             content=str(payload["document"]),
             published_at=datetime(as_of_date.year, as_of_date.month, as_of_date.day, tzinfo=timezone.utc),
+            source_class="private",
+            trust="verified",
         ))
     specs = source_specs(payload)
     if specs:
@@ -162,6 +170,7 @@ def research_documents(payload: dict[str, Any], company_id: UUID, as_of_date: da
                 raise ValueError(f"document contains no extractable text: {url}")
             published_at = parse_published_at(spec.get("published_at") or fetched.last_modified)
             host = (urlparse(url).hostname or "").lower()
+            source_class, trust = classify_document("url", url, registered_classes.get(url), checker)
             documents.append(RawDocument(
                 company_id=company_id,
                 source_type="hkex_filing" if "hkexnews.hk" in host else "company_ir",
@@ -170,6 +179,8 @@ def research_documents(payload: dict[str, Any], company_id: UUID, as_of_date: da
                 content=content,
                 published_at=published_at,
                 language=spec.get("language"),
+                source_class=source_class,
+                trust=trust,
                 page_starts=page_starts,
             ))
     if not documents:
@@ -236,7 +247,7 @@ def run_research_payload(payload: dict[str, Any], db_path: str | Path | None = N
         if not payload.get("_session_message_saved"):
             store.save_session_message(SessionMessage(session.id, "user", "text", {"text": question}))
         payload = merged_research_payload(store, project, payload)
-        documents = research_documents(payload, project.company_id, as_of_date)
+        documents = research_documents(payload, project.company_id, as_of_date, store=store)
         resume_raw = payload.get("_resume_run_id")
         resume_run_id = UUID(str(resume_raw)) if resume_raw else None
         report = pipeline.run(
@@ -289,7 +300,7 @@ def run_update_payload(payload: dict[str, Any], db_path: str | Path | None = Non
         if not payload.get("_session_message_saved"):
             store.save_session_message(SessionMessage(session.id, "user", "text", {"text": question}))
         merged = merged_research_payload(store, project, payload)
-        documents = research_documents(merged, project.company_id, as_of_date)
+        documents = research_documents(merged, project.company_id, as_of_date, store=store)
         seen_hashes = store.list_seen_content_hashes(project.company_id)
         new_documents = [document for document in documents if document.content_hash not in seen_hashes]
         if not new_documents:
@@ -370,7 +381,7 @@ def recalculate_report(report_id: str, assumptions: dict[str, Any] | None = None
             citation = row.get("citation") or {}
             evidence_id = citation.get("evidence_id")
             if evidence_id:
-                evidence_sources[str(evidence_id)] = {key: citation[key] for key in ("source_url", "source_title", "page") if key in citation}
+                evidence_sources[str(evidence_id)] = {key: citation[key] for key in ("source_url", "source_title", "page", "source_class", "trust") if key in citation}
             facts.append(FactCandidate(
                 metric=str(row["metric"]),
                 value=float(row["value"]),
@@ -417,7 +428,7 @@ def recalculate_report(report_id: str, assumptions: dict[str, Any] | None = None
         store.close()
 
 
-def answer_follow_up(provider: Any, content: str, report_context: str, project: ResearchProject) -> str:
+def answer_follow_up(provider: Any, content: str, report_context: str, project: ResearchProject, trusted_hosts: Iterable[str] | None = None) -> str:
     """Answer a follow-up, searching the web when the question asks for it."""
     lowered = content.casefold()
     wants_search = any(word in lowered for word in SEARCH_INTENT_WORDS)
@@ -431,11 +442,16 @@ def answer_follow_up(provider: Any, content: str, report_context: str, project: 
                 if results:
                     break
         if results:
-            return provider.answer_with_search(
-                content,
-                [{"title": item.title, "url": item.url, "snippet": item.snippet} for item in results],
-                report_context,
-            )
+            annotated = [
+                {
+                    "title": item.title,
+                    "url": item.url,
+                    "snippet": item.snippet,
+                    "trust": "whitelist" if host_in_set(item.url, trusted_hosts if trusted_hosts is not None else DEFAULT_TRUSTED_HOSTS) else "unverified",
+                }
+                for item in results
+            ]
+            return provider.answer_with_search(content, annotated, report_context)
     return provider.answer(content, report_context)
 
 
@@ -479,7 +495,7 @@ def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = No
                     if report_context:
                         break
             try:
-                answer = answer_follow_up(provider, content, report_context, project)
+                answer = answer_follow_up(provider, content, report_context, project, trusted_hosts=store.trusted_hosts_set())
             except LLMError:
                 raise
         store.save_session_message(SessionMessage(session_id, "assistant", "text", {"text": answer}))
@@ -592,13 +608,18 @@ def news_payload(name: str, symbol: str, query: str | None = None) -> list[dict[
     symbol is a last-resort fallback.  With a query, the company-scoped
     search ``"{name} {query}"`` wins and the raw query is the fallback.
     """
+    store = SQLiteStore(database_path())
+    try:
+        trusted_hosts = store.trusted_hosts_set()
+    finally:
+        store.close()
     google = GoogleNewsSearch()
     trimmed = (query or "").strip()
     if trimmed:
         for candidate in (f"{name} {trimmed}", trimmed):
             results = google.search(candidate, max_results=40)
             if results:
-                return [_news_item(item) for item in results]
+                return [_news_item(item, trusted_hosts) for item in results]
         return []
     collected: list[Any] = []
     seen: set[str] = set()
@@ -611,23 +632,29 @@ def news_payload(name: str, symbol: str, query: str | None = None) -> list[dict[
             collected.append(item)
     if not collected:
         collected = list(google.search(symbol, max_results=20))
-    return [_news_item(item) for item in collected[:DEFAULT_NEWS_LIMIT]]
+    return [_news_item(item, trusted_hosts) for item in collected[:DEFAULT_NEWS_LIMIT]]
 
 
-def _news_item(item: Any) -> dict[str, Any]:
+def _news_item(item: Any, trusted_hosts: Iterable[str] = ()) -> dict[str, Any]:
     """Resolve Google News redirects upfront and flag unresolvable ones.
 
     Old-format redirect IDs resolve to the publisher URL and stay readable
     in-app; new-format IDs cannot be resolved server-side, so they are marked
-    ``external`` and the UI opens them directly in a new tab.
+    ``external`` and the UI opens them directly in a new tab.  Resolved
+    publishers on the trusted-host whitelist additionally get ``trust:
+    'whitelist'``; everything else is ``unverified`` (news is never persisted,
+    so this is judged live per request).
     """
     resolved = resolve_google_news_url(item.url)
+    external = "news.google.com" in urlparse(resolved).netloc
+    trusted = (not external) and host_in_set(resolved, trusted_hosts)
     return {
         "title": item.title,
         "url": resolved,
         "source": item.snippet,
         "time": item.published,
-        "external": "news.google.com" in urlparse(resolved).netloc,
+        "external": external,
+        "trust": "whitelist" if trusted else "unverified",
     }
 
 
@@ -718,16 +745,18 @@ def company_panel_payload(symbol: str, market: str) -> dict[str, Any]:
         store.close()
 
 
-def add_company_source(symbol: str, market: str, url: str, title: str | None = None) -> dict[str, Any]:
+def add_company_source(symbol: str, market: str, url: str, title: str | None = None, source_class: str = "private") -> dict[str, Any]:
     url = url.strip()
     if not url.startswith(("http://", "https://")):
         raise ValueError("资料 URL 必须是 http(s) 链接")
+    if source_class not in ("private", "public"):
+        raise ValueError("source_class 必须是 private 或 public")
     store = SQLiteStore(database_path())
     try:
         project = store.find_project(symbol, market)
         if project is None:
             raise ValueError("company not found")
-        source = store.add_company_source(project.company_id, url, (title or "").strip() or None)
+        source = store.add_company_source(project.company_id, url, (title or "").strip() or None, source_class)
         return {"available": True, "source": source, "sources": store.list_company_sources(project.company_id)}
     finally:
         store.close()
@@ -737,6 +766,35 @@ def remove_company_source(source_id: str) -> None:
     store = SQLiteStore(database_path())
     try:
         store.remove_company_source(UUID(source_id))
+    finally:
+        store.close()
+
+
+def trusted_hosts_payload() -> dict[str, Any]:
+    store = SQLiteStore(database_path())
+    try:
+        return {"hosts": store.list_trusted_hosts()}
+    finally:
+        store.close()
+
+
+def add_trusted_host_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    host = str(payload.get("host", "")).strip()
+    if not host:
+        raise ValueError("host is required")
+    label = str(payload.get("label", "")).strip() or None
+    store = SQLiteStore(database_path())
+    try:
+        stored = store.add_trusted_host(host, label)
+        return {"host": stored, "hosts": store.list_trusted_hosts()}
+    finally:
+        store.close()
+
+
+def remove_trusted_host_payload(host_id: str) -> None:
+    store = SQLiteStore(database_path())
+    try:
+        store.remove_trusted_host(int(host_id))
     finally:
         store.close()
 
@@ -755,6 +813,8 @@ def history_payload(path: str) -> dict[str, Any] | list[dict[str, Any]]:
         if not symbol:
             raise ValueError("symbol is required")
         return company_panel_payload(symbol, market)
+    if parsed.path == "/api/trusted-hosts":
+        return trusted_hosts_payload()
     if parsed.path == "/api/news":
         query = parse_qs(parsed.query)
         name = (query.get("name") or [""])[0].strip()

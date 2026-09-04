@@ -249,3 +249,20 @@ body { background:var(--paper); color:var(--ink); }
 .diff-tag.new { background:#e8f7f2; color:#216e5a; }
 .diff-tag.changed { background:#fff4e5; color:#b25e09; }
 .diff-tag.valuation { background:#eef4ff; color:#2457d6; }
+
+/* Source trust badges: private(verified) / whitelist / unverified */
+.trust-tag { flex:0 0 auto; display:inline-flex; align-items:center; padding:1px 7px; border-radius:9px; font-size:10px; font-weight:600; line-height:1.5; }
+.trust-private { background:#f0eafc; color:#6941c6; }
+.trust-whitelist { background:#e8f7f2; color:#216e5a; }
+.trust-unverified { background:#fff4e5; color:#b25e09; }
+.news-card .trust-tag { position:absolute; top:8px; right:9px; }
+.fact-source { display:inline-flex; align-items:center; gap:5px; white-space:nowrap; }
+.fact-source a { overflow:hidden; text-overflow:ellipsis; }
+
+/* Trusted-host whitelist manager (sources tab) */
+.host-whitelist { margin-top:14px; }
+.host-whitelist > summary { cursor:pointer; list-style:none; }
+.host-whitelist > summary::-webkit-details-marker { display:none; }
+.host-whitelist > summary::after { content:" ▾"; color:#9aa6a0; }
+.host-whitelist[open] > summary::after { content:" ▴"; }
+.host-whitelist .source-add { margin:8px 0; }

@@ -19,6 +19,7 @@ from .documents import RawDocument, EvidenceChunk
 from .facts import FactCandidate
 from .calculations import CalculationResult
 from .events import RunEvent
+from .trust import host_in_set, normalize_host
 
 
 def _json(value: Any) -> str:
@@ -139,12 +140,60 @@ class SQLiteStore:
                 tag_id TEXT NOT NULL REFERENCES tags(id),
                 PRIMARY KEY(project_id, tag_id)
             );
+            CREATE TABLE IF NOT EXISTS trusted_hosts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                host TEXT NOT NULL UNIQUE,
+                label TEXT,
+                created_at TEXT NOT NULL
+            );
             """
         )
         columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(runs)").fetchall()}
         if "session_id" not in columns:
             self.connection.execute("ALTER TABLE runs ADD COLUMN session_id TEXT REFERENCES sessions(id)")
+        document_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(documents)").fetchall()}
+        if "source_class" not in document_columns:
+            self.connection.execute("ALTER TABLE documents ADD COLUMN source_class TEXT")
+        if "trust" not in document_columns:
+            self.connection.execute("ALTER TABLE documents ADD COLUMN trust TEXT")
+        source_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(company_sources)").fetchall()}
+        if "source_class" not in source_columns:
+            self.connection.execute("ALTER TABLE company_sources ADD COLUMN source_class TEXT DEFAULT 'private'")
+        self._backfill_document_trust()
+        self._seed_trusted_hosts()
         self.connection.commit()
+
+    # Legacy documents predate trust classification; backfill them once from
+    # their source_type so old reports keep meaningful badges.
+    _PRIVATE_SOURCE_TYPES = ("user_text", "local_fixture", "local_file")
+    _PUBLIC_SOURCE_TYPES = ("hkex_filing", "company_ir")
+
+    def _backfill_document_trust(self) -> None:
+        private = ",".join("?" * len(self._PRIVATE_SOURCE_TYPES))
+        public = ",".join("?" * len(self._PUBLIC_SOURCE_TYPES))
+        self.connection.execute(
+            f"""UPDATE documents SET source_class='private', trust='verified'
+                WHERE trust IS NULL AND source_type IN ({private})""",
+            self._PRIVATE_SOURCE_TYPES,
+        )
+        self.connection.execute(
+            f"""UPDATE documents SET source_class='public', trust='whitelist'
+                WHERE trust IS NULL AND source_type IN ({public})""",
+            self._PUBLIC_SOURCE_TYPES,
+        )
+
+    _DEFAULT_TRUSTED_HOSTS = (
+        ("www1.hkexnews.hk", "港交所披露易"),
+        ("www.hkexnews.hk", "港交所披露易"),
+        ("hkexnews.hk", "港交所披露易"),
+    )
+
+    def _seed_trusted_hosts(self) -> None:
+        for host, label in self._DEFAULT_TRUSTED_HOSTS:
+            self.connection.execute(
+                "INSERT OR IGNORE INTO trusted_hosts (host,label,created_at) VALUES (?,?,?)",
+                (host, label, _dt(datetime.now(timezone.utc))),
+            )
 
     def save_project(self, project: ResearchProject) -> None:
         self.connection.execute(
@@ -407,14 +456,16 @@ class SQLiteStore:
 
     def save_document(self, document: RawDocument, run_id: UUID | None = None) -> None:
         self.connection.execute(
-            """INSERT INTO documents (id,company_id,source_type,source_url,title,content,content_hash,published_at,period_start,period_end,language)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """INSERT INTO documents (id,company_id,source_type,source_url,title,content,content_hash,published_at,period_start,period_end,language,source_class,trust)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(id) DO UPDATE SET content=excluded.content, content_hash=excluded.content_hash,
                  title=excluded.title, published_at=excluded.published_at, period_start=excluded.period_start,
-                 period_end=excluded.period_end, language=excluded.language""",
+                 period_end=excluded.period_end, language=excluded.language,
+                 source_class=excluded.source_class, trust=excluded.trust""",
             (str(document.id), str(document.company_id), document.source_type, document.source_url, document.title,
              document.content, document.content_hash, _dt(document.published_at), document.period_start.isoformat() if document.period_start else None,
-             document.period_end.isoformat() if document.period_end else None, document.language),
+             document.period_end.isoformat() if document.period_end else None, document.language,
+             document.source_class, document.trust),
         )
         if run_id is not None:
             self.connection.execute(
@@ -558,7 +609,7 @@ class SQLiteStore:
 
     def list_company_documents(self, company_id: UUID) -> list[dict[str, Any]]:
         rows = self.connection.execute(
-            "SELECT id, source_type, source_url, title, published_at FROM documents WHERE company_id=? ORDER BY published_at DESC, id",
+            "SELECT id, source_type, source_url, title, published_at, source_class, trust FROM documents WHERE company_id=? ORDER BY published_at DESC, id",
             (str(company_id),),
         ).fetchall()
         return [dict(row) for row in rows]
@@ -575,7 +626,7 @@ class SQLiteStore:
         ).fetchall()
         return {row["content_hash"] for row in rows}
 
-    def add_company_source(self, company_id: UUID, url: str, title: str | None = None) -> dict[str, Any]:
+    def add_company_source(self, company_id: UUID, url: str, title: str | None = None, source_class: str = "private") -> dict[str, Any]:
         existing = self.connection.execute(
             "SELECT * FROM company_sources WHERE company_id=? AND url=?", (str(company_id), url),
         ).fetchone()
@@ -583,8 +634,8 @@ class SQLiteStore:
             return dict(existing)
         row_id = str(uuid4())
         self.connection.execute(
-            "INSERT INTO company_sources (id, company_id, url, title, created_at) VALUES (?,?,?,?,?)",
-            (row_id, str(company_id), url, title, _dt(datetime.now(timezone.utc))),
+            "INSERT INTO company_sources (id, company_id, url, title, created_at, source_class) VALUES (?,?,?,?,?,?)",
+            (row_id, str(company_id), url, title, _dt(datetime.now(timezone.utc)), source_class),
         )
         self.connection.commit()
         row = self.connection.execute("SELECT * FROM company_sources WHERE id=?", (row_id,)).fetchone()
@@ -592,10 +643,53 @@ class SQLiteStore:
 
     def list_company_sources(self, company_id: UUID) -> list[dict[str, Any]]:
         rows = self.connection.execute(
-            "SELECT id, url, title, created_at FROM company_sources WHERE company_id=? ORDER BY created_at DESC, id",
+            "SELECT id, url, title, created_at, source_class FROM company_sources WHERE company_id=? ORDER BY created_at DESC, id",
             (str(company_id),),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def company_source_classes(self, company_id: UUID) -> dict[str, str]:
+        """Registered URL -> source_class map (defaults to private)."""
+        rows = self.connection.execute(
+            "SELECT url, source_class FROM company_sources WHERE company_id=?",
+            (str(company_id),),
+        ).fetchall()
+        return {row["url"]: (row["source_class"] or "private") for row in rows}
+
+    def list_trusted_hosts(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT id, host, label, created_at FROM trusted_hosts ORDER BY created_at, id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def trusted_hosts_set(self) -> set[str]:
+        return {row["host"] for row in self.connection.execute("SELECT host FROM trusted_hosts").fetchall()}
+
+    def is_trusted_host(self, host: str | None) -> bool:
+        return host_in_set(host, self.trusted_hosts_set())
+
+    def add_trusted_host(self, host: str, label: str | None = None) -> dict[str, Any]:
+        normalized = normalize_host(host)
+        # Canonicalize to the bare host so www. variants dedupe to one row;
+        # lookups still tolerate both forms via host_in_set.
+        if normalized.startswith("www."):
+            normalized = normalized[4:]
+        if not normalized or "." not in normalized or " " in normalized:
+            raise ValueError("host 必须是合法域名，例如 hkexnews.hk")
+        existing = self.connection.execute("SELECT * FROM trusted_hosts WHERE host IN (?, ?)", (normalized, f"www.{normalized}")).fetchone()
+        if existing:
+            return dict(existing)
+        self.connection.execute(
+            "INSERT INTO trusted_hosts (host,label,created_at) VALUES (?,?,?)",
+            (normalized, (label or "").strip() or None, _dt(datetime.now(timezone.utc))),
+        )
+        self.connection.commit()
+        row = self.connection.execute("SELECT * FROM trusted_hosts WHERE host=?", (normalized,)).fetchone()
+        return dict(row)
+
+    def remove_trusted_host(self, host_id: int) -> None:
+        self.connection.execute("DELETE FROM trusted_hosts WHERE id=?", (int(host_id),))
+        self.connection.commit()
 
     def remove_company_source(self, source_id: UUID) -> None:
         self.connection.execute("DELETE FROM company_sources WHERE id=?", (str(source_id),))

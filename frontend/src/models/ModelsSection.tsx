@@ -373,7 +373,7 @@ export function ModelsSection(props: ModelsSectionProps): ReactNode {
         ) : declaring ? (
           <div className={styles["addCard"]}>
             <CustomProviderCard
-              taken={rows.map((row) => row.provider.name)}
+              taken={rows.map((row) => row.provider.route)}
               onClose={(changed) => {
                 setDeclaring(false);
                 if (changed) void load();

@@ -5,11 +5,14 @@
  *
  * This is a create, not an edit, which is why it is its own card rather than
  * the provider editor with extra fields: the provider is being *chosen* here,
- * and the row does not exist until it is. The create writes the provider row
- * (name, base URL, optional key), then the model catalog as one batch sync —
- * exactly as an existing provider's edits do.
- *（抄自 deepseek-harness ui-settings-models/CustomProviderCard.tsx，写路径改接本项目
- * /api/llm/providers 与 /api/llm/models/batch。）
+ * and the row does not exist until it is. The three identity fields —
+ * **Provider ID**（route，机器身份，唯一且落库后不可改）、**显示名称**（name，
+ * 随时可改）、**API 协议**（protocol，决定走哪条线路适配器）— 来自
+ * deepseek-harness 的同款卡片。The create writes the provider row (route,
+ * name, protocol, base URL, optional key), then the model catalog as one
+ * batch sync — exactly as an existing provider's edits do.
+ *（抄自 deepseek-harness ui-settings-models/CustomProviderCard.tsx，写路径改接
+ * 本项目 /api/llm/providers 与 /api/llm/models/batch。）
  */
 
 import { useState } from "react";
@@ -22,12 +25,14 @@ import { ModelListEditor } from "./ModelListEditor";
 import type { ModelDraft } from "./ModelListEditor";
 import { draftsToPayload } from "./ProviderEditor";
 import { t as tf } from "./locales";
-import type { en } from "./locales";
 import styles from "./ModelsSection.module.css";
+
+/** route（Provider ID）格式，与后端 _LLM_ROUTE_PATTERN / harness ROUTE_PATTERN 一致。 */
+const ROUTE_PATTERN = /^[a-z][a-z0-9-]*$/;
 
 /** Props of {@link CustomProviderCard}. */
 export interface CustomProviderCardProps {
-  /** Names already declared, so the card refuses to shadow one. */
+  /** Provider IDs（route）already declared, so the card refuses to shadow one. */
   taken: readonly string[];
   /** Close the card; `changed` reports whether a provider was created. */
   onClose: (changed: boolean) => void;
@@ -39,6 +44,7 @@ export interface CustomProviderCardProps {
 export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
   const { taken } = props;
   const t = tf;
+  const [route, setRoute] = useState("");
   const [name, setName] = useState("");
   const [baseURL, setBaseURL] = useState("");
   const [keyDraft, setKeyDraft] = useState("");
@@ -55,7 +61,15 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
   /** Everything but the key stops being editable once the provider exists. */
   const profileDisabled = disabled || committed;
 
-  const nameTaken = name.length > 0 && taken.includes(name.trim());
+  // route 是机器身份：格式合法且不与已声明提供方撞车才放行；显示名允许重复。
+  const routeFailure =
+    route.length === 0
+      ? undefined
+      : ROUTE_PATTERN.test(route.trim())
+        ? taken.includes(route.trim())
+          ? "customRouteTaken"
+          : undefined
+        : "customRouteInvalid";
   // Rows are checked by the same per-row validator the editor cards use, so a
   // bad row is named by its position here too.
   const modelFailure = validateDeepSeekModels(models);
@@ -64,15 +78,21 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
   // string, which the create path reads as "no key supplied".
   const keyValue = keyDraft.trim();
   const ready =
+    route.trim().length > 0 &&
+    routeFailure === undefined &&
     name.trim().length > 0 &&
-    !nameTaken &&
     baseURL.length > 0 &&
     modelFailure === undefined &&
     keyFailure === undefined;
   // The one blocked gate worth a line under the form. A satisfied card says
   // nothing at all rather than printing an empty paragraph.
   const hint =
-    failure !== undefined || ready || keyFailure !== undefined || name.length === 0 || nameTaken
+    failure !== undefined ||
+    ready ||
+    keyFailure !== undefined ||
+    routeFailure !== undefined ||
+    route.length === 0 ||
+    name.length === 0
       ? undefined
       : baseURL.length === 0
         ? t("customNeedsBaseUrl")
@@ -86,11 +106,13 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
     if (!committed) {
       const created = await api.saveLlmProvider({
         name: name.trim(),
+        route: route.trim(),
+        protocol: "openai-compatible",
         base_url: baseURL,
         ...(storesKey ? { api_key: keyValue } : {}),
       });
       // The provider now exists. A retry after the catalog write below fails
-      // must not re-run this create: the row exists and the name is taken, so
+      // must not re-run this create: the row exists and the route is taken, so
       // the retry goes straight to the catalog write.
       setCommitted(true);
       if (models.length > 0) {
@@ -132,6 +154,27 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
         <span className={styles["editorTitle"]}>{t("customTitle")}</span>
       </div>
       <div className={styles["field"]}>
+        <span className={styles["fieldLabel"]}>{t("customRoute")}</span>
+        <input
+          className={styles["input"]}
+          type="text"
+          value={route}
+          placeholder="acme-gateway"
+          aria-label={t("customRoute")}
+          disabled={profileDisabled}
+          onChange={(event) => {
+            setRoute(event.target.value);
+          }}
+        />
+      </div>
+      {/* A rejected ID reads as a fault, not as guidance — the same split the
+          key field below already makes between its failure and its hint. */}
+      {routeFailure === undefined ? (
+        <p className={styles["advancedHint"]}>{t("customRouteHint")}</p>
+      ) : (
+        <p className={styles["error"]}>{t(routeFailure)}</p>
+      )}
+      <div className={styles["field"]}>
         <span className={styles["fieldLabel"]}>{t("customDisplayName")}</span>
         <input
           className={styles["input"]}
@@ -145,13 +188,20 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
           }}
         />
       </div>
-      {/* A rejected name reads as a fault, not as guidance — the same split the
-          key field below already makes between its failure and its hint. */}
-      {nameTaken ? (
-        <p className={styles["error"]}>{t("customRouteTaken")}</p>
-      ) : (
-        <p className={styles["advancedHint"]}>{t("customRouteHint")}</p>
-      )}
+      <div className={styles["field"]}>
+        <span className={styles["fieldLabel"]}>{t("customApi")}</span>
+        <select
+          className={`${styles["input"]} ${styles["selectInput"]}`}
+          value="openai-compatible"
+          aria-label={t("customApi")}
+          disabled={profileDisabled}
+          onChange={() => {
+            /* 目录当前只提供一种线路协议；选择器保持 harness 结构。 */
+          }}
+        >
+          <option value="openai-compatible">{t("customApiOpenai")}</option>
+        </select>
+      </div>
       <div className={styles["field"]}>
         <span className={styles["fieldLabel"]}>{t("baseUrl")}</span>
         <input

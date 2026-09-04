@@ -27,6 +27,8 @@ _THINKING_TOGGLE_ARK = _THINKING_TOGGLE_ZHIPU
 BUILTIN_PROVIDERS: tuple[dict[str, Any], ...] = (
     {
         "name": "DeepSeek",
+        "route": "deepseek",
+        "protocol": "openai-compatible",
         "base_url": "https://api.deepseek.com/v1",
         "models": (
             {"model_id": "deepseek-chat", "display_name": "DeepSeek-V3（对话）", "thinking_levels": {}},
@@ -35,6 +37,8 @@ BUILTIN_PROVIDERS: tuple[dict[str, Any], ...] = (
     },
     {
         "name": "Kimi（月之暗面）",
+        "route": "kimi",
+        "protocol": "openai-compatible",
         "base_url": "https://api.moonshot.cn/v1",
         "models": (
             {"model_id": "kimi-latest", "display_name": "Kimi 最新版", "thinking_levels": {}},
@@ -44,6 +48,8 @@ BUILTIN_PROVIDERS: tuple[dict[str, Any], ...] = (
     },
     {
         "name": "智谱 GLM",
+        "route": "zhipu",
+        "protocol": "openai-compatible",
         "base_url": "https://open.bigmodel.cn/api/paas/v4",
         "models": (
             {"model_id": "glm-4.6", "display_name": "GLM-4.6", "thinking_levels": _THINKING_TOGGLE_ZHIPU},
@@ -53,6 +59,8 @@ BUILTIN_PROVIDERS: tuple[dict[str, Any], ...] = (
     },
     {
         "name": "通义千问（百炼）",
+        "route": "qwen",
+        "protocol": "openai-compatible",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "models": (
             {"model_id": "qwen-plus", "display_name": "Qwen-Plus", "thinking_levels": _THINKING_TOGGLE_QWEN},
@@ -62,6 +70,8 @@ BUILTIN_PROVIDERS: tuple[dict[str, Any], ...] = (
     },
     {
         "name": "火山方舟（豆包）",
+        "route": "ark",
+        "protocol": "openai-compatible",
         "base_url": "https://ark.cn-beijing.volces.com/api/v3",
         "models": (
             {"model_id": "doubao-seed-1-6-250615", "display_name": "豆包 Seed 1.6", "thinking_levels": _THINKING_TOGGLE_ARK},
@@ -71,6 +81,8 @@ BUILTIN_PROVIDERS: tuple[dict[str, Any], ...] = (
     },
     {
         "name": "硅基流动",
+        "route": "siliconflow",
+        "protocol": "openai-compatible",
         "base_url": "https://api.siliconflow.cn/v1",
         "models": (
             {"model_id": "deepseek-ai/DeepSeek-V3", "display_name": "DeepSeek-V3（托管）", "thinking_levels": {}},

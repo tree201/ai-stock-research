@@ -148,7 +148,9 @@ class SQLiteStore:
             );
             CREATE TABLE IF NOT EXISTS llm_providers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL UNIQUE,
+                route TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                protocol TEXT NOT NULL DEFAULT 'openai-compatible',
                 base_url TEXT NOT NULL,
                 api_key TEXT,
                 enabled INTEGER NOT NULL DEFAULT 1,
@@ -189,6 +191,7 @@ class SQLiteStore:
             self.connection.execute("ALTER TABLE llm_models ADD COLUMN context_window INTEGER")
         if "max_tokens" not in model_columns:
             self.connection.execute("ALTER TABLE llm_models ADD COLUMN max_tokens INTEGER")
+        self._migrate_llm_providers_route()
         self._backfill_document_trust()
         self._seed_trusted_hosts()
         self._seed_llm_catalog()
@@ -198,6 +201,41 @@ class SQLiteStore:
     # their source_type so old reports keep meaningful badges.
     _PRIVATE_SOURCE_TYPES = ("user_text", "local_fixture", "local_file")
     _PUBLIC_SOURCE_TYPES = ("hkex_filing", "company_ir")
+
+    def _migrate_llm_providers_route(self) -> None:
+        """旧库补 route/protocol 列并回填（deepseek-harness 语义：route 是机器
+        身份、显示名可改；protocol 是线路协议，当前仅 openai-compatible）。
+
+        route 唯一性用独立唯一索引保证，name 的 UNIQUE 约束在旧库结构中无法
+        去除（SQLite 不支持删列约束），显示名在旧库仍不可重复。
+        """
+        columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(llm_providers)").fetchall()}
+        if "route" not in columns:
+            self.connection.execute("ALTER TABLE llm_providers ADD COLUMN route TEXT")
+        if "protocol" not in columns:
+            self.connection.execute("ALTER TABLE llm_providers ADD COLUMN protocol TEXT NOT NULL DEFAULT 'openai-compatible'")
+        from .llm_catalog import BUILTIN_PROVIDERS
+
+        preset_routes = {preset["name"]: preset["route"] for preset in BUILTIN_PROVIDERS}
+        taken: set[str] = set()
+        rows = self.connection.execute("SELECT id, name, route FROM llm_providers").fetchall()
+        for row in rows:
+            if row["route"] and row["route"].strip():
+                taken.add(row["route"].strip())
+                continue
+            # 内置预设用目录里的 route；自定义用 name 的 ASCII slug，空则回退 id。
+            route = preset_routes.get(row["name"])
+            if not route:
+                route = self._derive_route(row["name"]) or f"provider-{row['id']}"
+            candidate, suffix = route, 2
+            while candidate in taken:
+                candidate = f"{route}-{suffix}"
+                suffix += 1
+            taken.add(candidate)
+            self.connection.execute("UPDATE llm_providers SET route=? WHERE id=?", (candidate, row["id"]))
+        self.connection.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_providers_route ON llm_providers(route)"
+        )
 
     def _backfill_document_trust(self) -> None:
         private = ",".join("?" * len(self._PRIVATE_SOURCE_TYPES))
@@ -232,18 +270,19 @@ class SQLiteStore:
 
         now = _dt(datetime.now(timezone.utc))
         tombstones = set(self.get_setting("llm.deleted_models") or [])
+        # 墓碑按 route 记录；旧库的墓碑存的是显示名，两者都参与匹配。
         deleted_providers = set(self.get_setting("llm.deleted_providers") or [])
         for provider in BUILTIN_PROVIDERS:
-            if provider["name"] in deleted_providers:
+            if provider["name"] in deleted_providers or provider["route"] in deleted_providers:
                 continue
             cursor = self.connection.execute(
-                "INSERT OR IGNORE INTO llm_providers (name,base_url,api_key,enabled,builtin,created_at) VALUES (?,?,?,1,1,?)",
-                (provider["name"], provider["base_url"], None, now),
+                "INSERT OR IGNORE INTO llm_providers (route,name,protocol,base_url,api_key,enabled,builtin,created_at) VALUES (?,?,?,?,NULL,1,1,?)",
+                (provider["route"], provider["name"], provider["protocol"], provider["base_url"], now),
             )
             if cursor.rowcount:
                 provider_id = cursor.lastrowid
             else:
-                row = self.connection.execute("SELECT id FROM llm_providers WHERE name=?", (provider["name"],)).fetchone()
+                row = self.connection.execute("SELECT id FROM llm_providers WHERE route=?", (provider["route"],)).fetchone()
                 provider_id = row["id"]
             for model in provider["models"]:
                 if f"{provider['name']}:{model['model_id']}" in tombstones:
@@ -265,21 +304,51 @@ class SQLiteStore:
         row = self.connection.execute("SELECT * FROM llm_providers WHERE id=?", (provider_id,)).fetchone()
         return dict(row) if row else None
 
-    def add_llm_provider(self, name: str, base_url: str, api_key: str | None = None, *, builtin: bool = False) -> dict[str, Any]:
+    def add_llm_provider(
+        self,
+        name: str,
+        base_url: str,
+        api_key: str | None = None,
+        *,
+        builtin: bool = False,
+        route: str | None = None,
+        protocol: str = "openai-compatible",
+    ) -> dict[str, Any]:
         name = name.strip()
         base_url = base_url.strip().rstrip("/")
         if not name or not base_url:
             raise ValueError("name 和 base_url 必填")
+        # route 是机器身份（唯一）；缺省从 name 推导，保证任何路径都有身份。
+        route = (route or "").strip() or self._derive_route(name) or "provider"
+        if self.connection.execute("SELECT 1 FROM llm_providers WHERE route=?", (route,)).fetchone():
+            raise ValueError(f"已有提供方使用了这个 ID：{route}")
         now = _dt(datetime.now(timezone.utc))
-        cursor = self.connection.execute(
-            "INSERT INTO llm_providers (name,base_url,api_key,enabled,builtin,created_at) VALUES (?,?,?,1,?,?)",
-            (name, base_url, (api_key or "").strip() or None, 1 if builtin else 0, now),
-        )
-        # 重新添加内置供应商时清掉墓碑，否则重启后会被 seed 跳过。
-        deleted = [entry for entry in (self.get_setting("llm.deleted_providers") or []) if entry != name]
+        try:
+            cursor = self.connection.execute(
+                "INSERT INTO llm_providers (route,name,protocol,base_url,api_key,enabled,builtin,created_at) VALUES (?,?,?,?,?,1,?,?)",
+                (route, name, protocol, base_url, (api_key or "").strip() or None, 1 if builtin else 0, now),
+            )
+        except sqlite3.IntegrityError as error:
+            # 旧库结构里 name 仍带 UNIQUE 约束，翻译成可读错误。
+            raise ValueError("提供方名称或 ID 重复") from error
+        # 重新添加内置供应商时清掉墓碑（route 与旧显示名两种形态都清）。
+        deleted = [
+            entry
+            for entry in (self.get_setting("llm.deleted_providers") or [])
+            if entry != route and entry != name
+        ]
         self.set_setting("llm.deleted_providers", deleted)
         self.connection.commit()
         return self.get_llm_provider(cursor.lastrowid)  # type: ignore[return-value]
+
+    @staticmethod
+    def _derive_route(name: str) -> str:
+        """显示名 → route slug（ASCII 小写字母/数字/短横线）。"""
+        parts = [
+            "".join(ch for ch in part if ch.isascii() and ch.isalnum())
+            for part in name.lower().split()
+        ]
+        return "-".join(part for part in parts if part)
 
     def update_llm_provider(self, provider_id: int, *, name: str | None = None, base_url: str | None = None, api_key: str | None = None) -> dict[str, Any]:
         current = self.get_llm_provider(provider_id)
@@ -305,8 +374,8 @@ class SQLiteStore:
     def remove_llm_provider(self, provider_id: int) -> None:
         current = self.get_llm_provider(provider_id)
         if current and current.get("builtin"):
-            # 内置供应商删除后记墓碑，防止重启被 seed 复活；重新添加时清除。
-            deleted = (self.get_setting("llm.deleted_providers") or []) + [current["name"]]
+            # 内置供应商删除后记墓碑（按 route），防止重启被 seed 复活；重新添加时清除。
+            deleted = (self.get_setting("llm.deleted_providers") or []) + [current["route"]]
             self.set_setting("llm.deleted_providers", deleted)
         self.connection.execute("DELETE FROM llm_models WHERE provider_id=?", (provider_id,))
         self.connection.execute("DELETE FROM llm_providers WHERE id=?", (provider_id,))

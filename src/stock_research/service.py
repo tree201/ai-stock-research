@@ -851,6 +851,9 @@ def remove_trusted_host_payload(host_id: str) -> None:
 
 # --- LLM hub: 供应商/模型统一接入 + 选择状态 -------------------------------------
 
+# Provider ID（机器身份）格式，与 deepseek-harness 的 ROUTE_PATTERN 一致。
+_LLM_ROUTE_PATTERN = re.compile(r"[a-z][a-z0-9-]*")
+
 
 def llm_config_payload() -> dict[str, Any]:
     """模型接入总览：供应商（密钥脱敏）、模型目录、当前选择与最近使用。"""
@@ -888,17 +891,19 @@ def llm_config_payload() -> dict[str, Any]:
     by_row = {model["id"]: model for model in models_out}
     # 尚未添加的内置供应商目录（deepseek-harness configurable directory 语义）：
     # 行列表之外的预设出现在「添加提供方」里，而不是默认铺满整页。
-    known_names = {provider["name"] for provider in providers}
+    known_routes = {provider["route"] for provider in providers}
     catalog = [
         {
-            "key": preset["name"],
+            "key": preset["route"],
+            "route": preset["route"],
+            "protocol": preset["protocol"],
             "name": preset["name"],
             "base_url": preset["base_url"],
             "model_count": len(preset["models"]),
             "models": [{"model_id": model["model_id"], "display_name": model["display_name"]} for model in preset["models"]],
         }
         for preset in BUILTIN_PROVIDERS
-        if preset["name"] not in known_names
+        if preset["route"] not in known_routes
     ]
 
     def _entry(model_row_id: Any, level: Any = None) -> dict[str, Any] | None:
@@ -935,13 +940,16 @@ def save_llm_provider_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """创建或更新供应商；带 id 时为更新（api_key 留空表示不改）。
 
     创建分两种（deepseek-harness 两种获得提供方的方式）：带 preset 时从内置
-    目录落地一行（密钥可留空，行上显示缺失圆点）；否则为自定义提供方。
+    目录落地一行（密钥可留空，行上显示缺失圆点）；否则为自定义提供方，必须
+    带 route（机器身份，唯一）+ name（显示名，可改）+ protocol（线路协议）。
     """
     store = SQLiteStore(database_path())
     try:
         name = str(payload.get("name", "")).strip()
         base_url = str(payload.get("base_url", "")).strip()
         api_key = str(payload.get("api_key", "")).strip()
+        route = str(payload.get("route", "")).strip()
+        protocol = str(payload.get("protocol", "")).strip()
         provider_id = payload.get("id")
         if provider_id:
             fields: dict[str, Any] = {}
@@ -955,7 +963,7 @@ def save_llm_provider_payload(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             preset = str(payload.get("preset") or "").strip()
             if preset:
-                match = next((item for item in BUILTIN_PROVIDERS if item["name"] == preset), None)
+                match = next((item for item in BUILTIN_PROVIDERS if item["route"] == preset), None)
                 if match is None:
                     raise KeyError("预设供应商不存在")
                 stored = store.add_llm_provider(
@@ -963,11 +971,21 @@ def save_llm_provider_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     base_url or match["base_url"],
                     api_key or None,
                     builtin=True,
+                    route=match["route"],
+                    protocol=match["protocol"],
                 )
             else:
                 if not name or not base_url:
                     raise ValueError("name 和 base_url 必填")
-                stored = store.add_llm_provider(name, base_url, api_key or None)
+                if not _LLM_ROUTE_PATTERN.fullmatch(route):
+                    raise ValueError("Provider ID 需以小写字母开头，之后可用小写字母、数字和短横线")
+                stored = store.add_llm_provider(
+                    name,
+                    base_url,
+                    api_key or None,
+                    route=route,
+                    protocol=protocol or "openai-compatible",
+                )
         return {"provider": {**stored, "api_key": None, "has_api_key": bool(stored.get("api_key"))}, "config": llm_config_payload()}
     finally:
         store.close()

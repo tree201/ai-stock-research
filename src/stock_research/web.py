@@ -16,7 +16,7 @@ from uuid import UUID
 from .service import (
     add_company_source,
     add_llm_model_payload,
-    add_llm_models_payload,
+    sync_llm_models_payload,
     add_trusted_host_payload,
     chat_entry_payload,
     chat_payload,
@@ -232,7 +232,7 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
             elif self.path == "/api/llm/models/discover":
                 response = discover_llm_models_payload(payload)
             elif self.path == "/api/llm/models/batch":
-                response = add_llm_models_payload(payload)
+                response = sync_llm_models_payload(payload)
             elif self.path == "/api/llm/selection":
                 response = set_llm_selection_payload(payload)
             elif self.path == "/api/chat":

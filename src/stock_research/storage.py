@@ -185,6 +185,10 @@ class SQLiteStore:
         model_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(llm_models)").fetchall()}
         if "default_level" not in model_columns:
             self.connection.execute("ALTER TABLE llm_models ADD COLUMN default_level TEXT")
+        if "context_window" not in model_columns:
+            self.connection.execute("ALTER TABLE llm_models ADD COLUMN context_window INTEGER")
+        if "max_tokens" not in model_columns:
+            self.connection.execute("ALTER TABLE llm_models ADD COLUMN max_tokens INTEGER")
         self._backfill_document_trust()
         self._seed_trusted_hosts()
         self._seed_llm_catalog()
@@ -228,7 +232,10 @@ class SQLiteStore:
 
         now = _dt(datetime.now(timezone.utc))
         tombstones = set(self.get_setting("llm.deleted_models") or [])
+        deleted_providers = set(self.get_setting("llm.deleted_providers") or [])
         for provider in BUILTIN_PROVIDERS:
+            if provider["name"] in deleted_providers:
+                continue
             cursor = self.connection.execute(
                 "INSERT OR IGNORE INTO llm_providers (name,base_url,api_key,enabled,builtin,created_at) VALUES (?,?,?,1,1,?)",
                 (provider["name"], provider["base_url"], None, now),
@@ -258,16 +265,19 @@ class SQLiteStore:
         row = self.connection.execute("SELECT * FROM llm_providers WHERE id=?", (provider_id,)).fetchone()
         return dict(row) if row else None
 
-    def add_llm_provider(self, name: str, base_url: str, api_key: str | None = None) -> dict[str, Any]:
+    def add_llm_provider(self, name: str, base_url: str, api_key: str | None = None, *, builtin: bool = False) -> dict[str, Any]:
         name = name.strip()
         base_url = base_url.strip().rstrip("/")
         if not name or not base_url:
             raise ValueError("name 和 base_url 必填")
         now = _dt(datetime.now(timezone.utc))
         cursor = self.connection.execute(
-            "INSERT INTO llm_providers (name,base_url,api_key,enabled,builtin,created_at) VALUES (?,?,?,1,0,?)",
-            (name, base_url, (api_key or "").strip() or None, now),
+            "INSERT INTO llm_providers (name,base_url,api_key,enabled,builtin,created_at) VALUES (?,?,?,1,?,?)",
+            (name, base_url, (api_key or "").strip() or None, 1 if builtin else 0, now),
         )
+        # 重新添加内置供应商时清掉墓碑，否则重启后会被 seed 跳过。
+        deleted = [entry for entry in (self.get_setting("llm.deleted_providers") or []) if entry != name]
+        self.set_setting("llm.deleted_providers", deleted)
         self.connection.commit()
         return self.get_llm_provider(cursor.lastrowid)  # type: ignore[return-value]
 
@@ -293,6 +303,11 @@ class SQLiteStore:
         return self.get_llm_provider(provider_id)  # type: ignore[return-value]
 
     def remove_llm_provider(self, provider_id: int) -> None:
+        current = self.get_llm_provider(provider_id)
+        if current and current.get("builtin"):
+            # 内置供应商删除后记墓碑，防止重启被 seed 复活；重新添加时清除。
+            deleted = (self.get_setting("llm.deleted_providers") or []) + [current["name"]]
+            self.set_setting("llm.deleted_providers", deleted)
         self.connection.execute("DELETE FROM llm_models WHERE provider_id=?", (provider_id,))
         self.connection.execute("DELETE FROM llm_providers WHERE id=?", (provider_id,))
         selection = self.get_setting("llm.selection")
@@ -338,6 +353,70 @@ class SQLiteStore:
     def _model_tombstone_key(self, provider_id: int, model_id: str) -> str | None:
         provider = self.get_llm_provider(provider_id)
         return f"{provider['name']}:{model_id}" if provider else None
+
+    def sync_llm_models(self, provider_id: int, entries: list[dict[str, Any]]) -> None:
+        """以草稿数组为准同步模型目录（deepseek-harness 整数组替换语义）。
+
+        新行继承内置目录的 thinking_levels/default_level（结构开放：已有行的
+        用户调优字段原样保留）；被移除的行记模型墓碑，选中态随之清理。
+        """
+        from .llm_catalog import BUILTIN_PROVIDERS, parse_thinking_levels
+
+        provider = self.get_llm_provider(provider_id)
+        if not provider:
+            raise KeyError("供应商不存在")
+        prepared: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for entry in entries:
+            entry = entry or {}
+            model_id = str(entry.get("model_id", "")).strip()
+            if not model_id:
+                raise ValueError("模型 ID 不能为空")
+            if model_id in seen:
+                raise ValueError(f"模型 ID 重复：{model_id}")
+            seen.add(model_id)
+            context_window = entry.get("context_window")
+            max_tokens = entry.get("max_tokens")
+            prepared.append({
+                "model_id": model_id,
+                "display_name": str(entry.get("display_name") or "").strip() or None,
+                "context_window": int(context_window) if context_window else None,
+                "max_tokens": int(max_tokens) if max_tokens else None,
+            })
+        catalog: dict[str, dict[str, Any]] = {}
+        for preset in BUILTIN_PROVIDERS:
+            if preset["name"] == provider["name"]:
+                catalog = {model["model_id"]: model for model in preset["models"]}
+        existing = {row["model_id"]: row for row in self.list_llm_models(provider_id)}
+        kept: set[str] = set()
+        for item in prepared:
+            row = existing.get(item["model_id"])
+            if row is None:
+                preset_model = catalog.get(item["model_id"], {})
+                levels = parse_thinking_levels(preset_model.get("thinking_levels"))
+                self.connection.execute(
+                    "INSERT INTO llm_models (provider_id,model_id,display_name,thinking_levels,default_level,context_window,max_tokens,enabled) VALUES (?,?,?,?,?,?,?,1)",
+                    (provider_id, item["model_id"], item["display_name"], _json(levels), preset_model.get("default_level"), item["context_window"], item["max_tokens"]),
+                )
+                self._drop_model_tombstone(provider_id, item["model_id"])
+            else:
+                self.connection.execute(
+                    "UPDATE llm_models SET display_name=?, context_window=?, max_tokens=? WHERE id=?",
+                    (item["display_name"], item["context_window"], item["max_tokens"], row["id"]),
+                )
+            kept.add(item["model_id"])
+        for model_id, row in existing.items():
+            if model_id in kept:
+                continue
+            key = self._model_tombstone_key(provider_id, model_id)
+            if key:
+                tombstones = (self.get_setting("llm.deleted_models") or []) + [key]
+                self.set_setting("llm.deleted_models", tombstones)
+            self.connection.execute("DELETE FROM llm_models WHERE id=?", (row["id"],))
+            selection = self.get_setting("llm.selection")
+            if selection and selection.get("model_row_id") == row["id"]:
+                self.connection.execute("DELETE FROM app_settings WHERE key='llm.selection'")
+        self.connection.commit()
 
     def _drop_model_tombstone(self, provider_id: int, model_id: str) -> None:
         key = self._model_tombstone_key(provider_id, model_id)

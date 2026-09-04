@@ -97,11 +97,24 @@ class LlmHubStorageTests(unittest.TestCase):
         self.store.set_setting("llm.selection", {"model_row_id": 1, "level": "high"})
         self.assertEqual(self.store.get_setting("llm.selection"), {"model_row_id": 1, "level": "high"})
 
-    def test_provider_api_key_required_for_create(self) -> None:
+    def test_provider_create_allows_blank_key_and_preset(self) -> None:
         from stock_research import service
 
-        with self.assertRaises(ValueError):
-            service.save_llm_provider_payload({"name": "NoKey", "base_url": "https://example.com/v1"})
+        # service 层走 database_path()，必须像 LlmSelectionServiceTests 一样隔离 env
+        with mock.patch.dict(os.environ, {"AI_STOCK_DB": f"{self._dir.name}/service.sqlite3"}):
+            # 自定义供应商：密钥可留空（行上显示缺失圆点）
+            result = service.save_llm_provider_payload({"name": "NoKey", "base_url": "https://example.com/v1"})
+            self.assertFalse(result["provider"]["has_api_key"])
+
+            # 预设供应商：删除后进入「添加提供方」目录，可再次落地（墓碑清除）
+            deepseek = next(p for p in self.store.list_llm_providers() if p["name"] == "DeepSeek")
+            service.remove_llm_provider_payload(str(deepseek["id"]))
+            config = service.llm_config_payload()
+            self.assertIn("DeepSeek", [entry["key"] for entry in config["catalog"]])
+            result = service.save_llm_provider_payload({"preset": "DeepSeek", "api_key": "sk-preset"})
+            self.assertTrue(result["provider"]["has_api_key"])
+            self.assertEqual(result["provider"]["base_url"], "https://api.deepseek.com/v1")
+            self.assertNotIn("DeepSeek", [entry["key"] for entry in result["config"]["catalog"]])
 
 
 class LlmSelectionServiceTests(unittest.TestCase):
@@ -231,10 +244,64 @@ class LlmDiscoveryTests(unittest.TestCase):
         self.assertTrue(items["deepseek-chat"])  # 目录里已有
         self.assertFalse(items["deepseek-v3.2"])
 
-        result = service.add_llm_models_payload({"provider_id": provider["id"], "model_ids": ["deepseek-v3.2", "deepseek-chat", ""]})
-        self.assertEqual(result["added"], ["deepseek-v3.2"])
+        result = service.sync_llm_models_payload({"provider_id": provider["id"], "models": [{"model_id": "deepseek-v3.2"}, {"model_id": "deepseek-chat"}]})
         stored = {m["model_id"] for m in self.store.list_llm_models(provider["id"])}
         self.assertIn("deepseek-v3.2", stored)
+
+    def test_sync_replaces_model_array(self) -> None:
+        from stock_research import service
+
+        provider = next(p for p in self.store.list_llm_providers() if p["name"] == "DeepSeek")
+        rows = self.store.list_llm_models(provider["id"])
+        keep = rows[0]
+        drop = rows[1]
+        self.store.set_setting("llm.selection", {"model_row_id": drop["id"], "provider_id": provider["id"], "model_id": drop["model_id"], "level": "off"})
+
+        service.sync_llm_models_payload({
+            "provider_id": provider["id"],
+            "models": [
+                {"model_id": keep["model_id"], "display_name": "改名了", "context_window": 131072, "max_tokens": 8192},
+                {"model_id": "hand-added"},
+            ],
+        })
+        stored = {m["model_id"]: m for m in self.store.list_llm_models(provider["id"])}
+        self.assertNotIn(drop["model_id"], stored)
+        self.assertIsNone(self.store.get_setting("llm.selection"))  # 选中行被删，选中态清理
+        self.assertEqual(stored[keep["model_id"]]["display_name"], "改名了")
+        self.assertEqual(stored[keep["model_id"]]["context_window"], 131072)
+        self.assertEqual(stored[keep["model_id"]]["max_tokens"], 8192)
+        # 手加模型无目录档位；被删模型记墓碑（重建 store 后不复活）
+        self.assertIsNotNone(stored["hand-added"])
+        self.store.close()
+        reopened = SQLiteStore(self.db_path)
+        try:
+            self.assertNotIn(drop["model_id"], {m["model_id"] for m in reopened.list_llm_models(provider["id"])})
+        finally:
+            reopened.close()
+
+    def test_deleted_provider_survives_restart_and_readopts(self) -> None:
+        provider = next(p for p in self.store.list_llm_providers() if p["name"] == "DeepSeek")
+        self.store.remove_llm_provider(provider["id"])
+        self.store.close()
+        reopened = SQLiteStore(self.db_path)
+        self.store = reopened
+        self.assertNotIn("DeepSeek", {p["name"] for p in reopened.list_llm_providers()})
+        # 重新添加后清墓碑，再重启不再被跳过
+        reopened.add_llm_provider("DeepSeek", "https://api.deepseek.com", builtin=True)
+        reopened.close()
+        again = SQLiteStore(self.db_path)
+        self.store = again
+        self.assertIn("DeepSeek", {p["name"] for p in again.list_llm_providers()})
+
+    def test_discover_by_draft_endpoint(self) -> None:
+        from stock_research import service
+
+        with mock.patch.object(service, "list_remote_models", return_value=["m-1"]) as mocked:
+            payload = service.discover_llm_models_payload({"base_url": "https://gw.example/v1", "api_key": "sk-draft"})
+        mocked.assert_called_once_with("https://gw.example/v1", "sk-draft")
+        self.assertEqual([item["model_id"] for item in payload["models"]], ["m-1"])
+        with self.assertRaises(ValueError):
+            service.discover_llm_models_payload({"base_url": "https://gw.example/v1"})
 
     def test_list_remote_models_parses_openai_shapes(self) -> None:
         from stock_research import llm as llm_module

@@ -21,7 +21,7 @@ from .facts import FactCandidate
 from .pipeline import ResearchPipeline
 from .report import ReportBuilder, diff_reports
 from .llm import LLMError, ModelNotConfiguredError, OpenAICompatibleProvider, list_remote_models, provider_from_config, provider_from_env
-from .llm_catalog import LEVEL_LABELS, THINKING_LEVELS, default_level_for, levels_for, normalize_level, params_for_level, parse_thinking_levels
+from .llm_catalog import BUILTIN_PROVIDERS, LEVEL_LABELS, THINKING_LEVELS, default_level_for, levels_for, normalize_level, params_for_level, parse_thinking_levels
 from .storage import SQLiteStore
 from .trust import DEFAULT_TRUSTED_HOSTS, classify_document, host_in_set
 from .workflow import ResearchWorkflow
@@ -880,10 +880,26 @@ def llm_config_payload() -> dict[str, Any]:
             "thinking_levels": parse_thinking_levels(model.get("thinking_levels")),
             "levels": levels_for(model.get("thinking_levels")),
             "default_level": default_level_for(model.get("thinking_levels"), model.get("default_level")),
+            "context_window": model.get("context_window"),
+            "max_tokens": model.get("max_tokens"),
         }
         for model in models
     ]
     by_row = {model["id"]: model for model in models_out}
+    # 尚未添加的内置供应商目录（deepseek-harness configurable directory 语义）：
+    # 行列表之外的预设出现在「添加提供方」里，而不是默认铺满整页。
+    known_names = {provider["name"] for provider in providers}
+    catalog = [
+        {
+            "key": preset["name"],
+            "name": preset["name"],
+            "base_url": preset["base_url"],
+            "model_count": len(preset["models"]),
+            "models": [{"model_id": model["model_id"], "display_name": model["display_name"]} for model in preset["models"]],
+        }
+        for preset in BUILTIN_PROVIDERS
+        if preset["name"] not in known_names
+    ]
 
     def _entry(model_row_id: Any, level: Any = None) -> dict[str, Any] | None:
         model = by_row.get(int(model_row_id)) if model_row_id is not None else None
@@ -908,6 +924,7 @@ def llm_config_payload() -> dict[str, Any]:
     return {
         "providers": providers_out,
         "models": models_out,
+        "catalog": catalog,
         "levels": [{"value": level, "label": LEVEL_LABELS[level]} for level in THINKING_LEVELS],
         "selection": current,
         "recent": recent,
@@ -915,7 +932,11 @@ def llm_config_payload() -> dict[str, Any]:
 
 
 def save_llm_provider_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """创建或更新供应商；带 id 时为更新（api_key 留空表示不改）。"""
+    """创建或更新供应商；带 id 时为更新（api_key 留空表示不改）。
+
+    创建分两种（deepseek-harness 两种获得提供方的方式）：带 preset 时从内置
+    目录落地一行（密钥可留空，行上显示缺失圆点）；否则为自定义提供方。
+    """
     store = SQLiteStore(database_path())
     try:
         name = str(payload.get("name", "")).strip()
@@ -932,9 +953,21 @@ def save_llm_provider_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 fields["api_key"] = api_key
             stored = store.update_llm_provider(int(provider_id), **fields)
         else:
-            if not api_key:
-                raise ValueError("api_key 必填")
-            stored = store.add_llm_provider(name, base_url, api_key)
+            preset = str(payload.get("preset") or "").strip()
+            if preset:
+                match = next((item for item in BUILTIN_PROVIDERS if item["name"] == preset), None)
+                if match is None:
+                    raise KeyError("预设供应商不存在")
+                stored = store.add_llm_provider(
+                    name or match["name"],
+                    base_url or match["base_url"],
+                    api_key or None,
+                    builtin=True,
+                )
+            else:
+                if not name or not base_url:
+                    raise ValueError("name 和 base_url 必填")
+                stored = store.add_llm_provider(name, base_url, api_key or None)
         return {"provider": {**stored, "api_key": None, "has_api_key": bool(stored.get("api_key"))}, "config": llm_config_payload()}
     finally:
         store.close()
@@ -964,54 +997,50 @@ def add_llm_model_payload(payload: dict[str, Any]) -> dict[str, Any]:
         store.close()
 
 
-def add_llm_models_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """批量添加模型（模型发现后勾选导入）；已存在的跳过。"""
+def sync_llm_models_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """以草稿数组为准同步供应商的模型目录（deepseek-harness 整数组替换语义）。
+
+    前端在编辑器里整表编辑（增删改行、发现导入），保存时一次提交最终列表。
+    """
     provider_id = int(payload.get("provider_id"))
-    model_ids = payload.get("model_ids")
-    if not isinstance(model_ids, list) or not model_ids:
-        raise ValueError("model_ids 不能为空")
+    entries = payload.get("models")
+    if not isinstance(entries, list):
+        raise ValueError("models 必须是列表")
     store = SQLiteStore(database_path())
     try:
-        added: list[str] = []
-        for raw in model_ids:
-            model_id = str(raw or "").strip()
-            if not model_id:
-                continue
-            try:
-                store.add_llm_model(provider_id, model_id)
-                added.append(model_id)
-            except ValueError:
-                # 已存在：add_llm_model 的 INSERT OR IGNORE 已开启隐式事务但未提交，
-                # 必须回滚释放写锁，否则后续 llm_config_payload 的新连接会被锁死。
-                store.connection.rollback()
-                continue
-        return {"ok": True, "added": added, "config": llm_config_payload()}
+        store.sync_llm_models(provider_id, entries)
+        return {"ok": True, "config": llm_config_payload()}
     finally:
         store.close()
 
 
 def discover_llm_models_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """调供应商的 /models 接口发现可用模型（参考 deepseek-harness discovery）。
+    """调提供方的 /models 接口发现可用模型（deepseek-harness discovery 语义）。
 
-    返回远端模型列表并标记哪些已在目录中；未配置密钥时要求先配置。
+    询问的是「表单当前显示」的端点：编辑已有提供方时按 provider_id 回落读取
+    存储值；创建卡片则直接带未保存的 base_url 与密钥来问，省去先存再返。
     """
-    provider_id = int(payload.get("provider_id"))
+    provider_id = payload.get("provider_id")
+    base_url = str(payload.get("base_url") or "").strip()
+    api_key = str(payload.get("api_key") or "").strip()
     store = SQLiteStore(database_path())
     try:
-        provider = store.get_llm_provider(provider_id)
-        if not provider:
-            raise KeyError("供应商不存在")
-        if not provider.get("api_key"):
-            raise ValueError("请先配置该供应商的 API Key 再拉取模型列表")
-        base_url = str(provider.get("base_url") or "").strip()
-        if not base_url:
-            raise ValueError("请先配置该供应商的接口地址")
-        remote = list_remote_models(base_url, provider["api_key"])
-        existing = {model["model_id"] for model in store.list_llm_models(provider_id)}
+        existing: set[str] = set()
+        if provider_id:
+            provider = store.get_llm_provider(int(provider_id))
+            if not provider:
+                raise KeyError("供应商不存在")
+            base_url = base_url or str(provider.get("base_url") or "").strip()
+            api_key = api_key or str(provider.get("api_key") or "").strip()
+            existing = {model["model_id"] for model in store.list_llm_models(int(provider_id))}
     finally:
         store.close()
+    if not base_url:
+        raise ValueError("请先填写接口地址，再获取")
+    if not api_key:
+        raise ValueError("请先填写 API 密钥，再获取")
+    remote = list_remote_models(base_url, api_key)
     return {
-        "provider_id": provider_id,
         "models": [{"model_id": model_id, "added": model_id in existing} for model_id in remote],
     }
 

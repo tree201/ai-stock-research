@@ -32,6 +32,8 @@ export const CSS_THEME_TOKENS: Record<ThemeName, Record<string, string>> = {
     "tag-ok-ink": "#216e5a",
     "tag-warn-bg": "#fff4e5",
     "tag-warn-ink": "#b25e09",
+    "danger": "#c94136",
+    "danger-soft": "#fbe9e5",
   },
   dark: {
     "paper": "#101312",
@@ -61,6 +63,8 @@ export const CSS_THEME_TOKENS: Record<ThemeName, Record<string, string>> = {
     "tag-ok-ink": "#5ecfa9",
     "tag-warn-bg": "#332a1c",
     "tag-warn-ink": "#e2a75e",
+    "danger": "#e5726a",
+    "danger-soft": "#33221f",
   },
 };
 

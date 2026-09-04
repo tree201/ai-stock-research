@@ -664,6 +664,22 @@ export default function App() {
   const [companyCatalogLoading, setCompanyCatalogLoading] = useState(false);
   const [companyCatalogLoaded, setCompanyCatalogLoaded] = useState(false);
   const [newResearchBusy, setNewResearchBusy] = useState(false);
+  const threadScrollRef = useRef<HTMLDivElement>(null);
+  const threadPinnedRef = useRef(true);
+
+  // 用户向上滚动超过阈值时暂停自动跟随，回到底部附近则恢复。
+  function handleThreadScroll(event: React.UIEvent<HTMLDivElement>) {
+    const el = event.currentTarget;
+    threadPinnedRef.current =
+      el.scrollTop + el.clientHeight >= el.scrollHeight - 140;
+  }
+
+  // 消息、进度或会话变化时，若处于跟随状态则滚到底部。
+  useEffect(() => {
+    const el = threadScrollRef.current;
+    if (!el || !threadPinnedRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages, pendingJob, progressRun, busy, sessionId]);
 
   useEffect(() => {
     localStorage.setItem("sidebarWidth", String(sidebarWidth));
@@ -1089,6 +1105,7 @@ export default function App() {
       setNewReportBadge(false);
     }
     const detail = await api.session(session.id);
+    threadPinnedRef.current = true;
     setSessionId(detail.session.id);
     setMessages(cleanMessages(detail.messages));
     const activeJob = (detail.jobs || []).find(
@@ -1181,6 +1198,7 @@ export default function App() {
       return;
     }
     submittingRef.current = true;
+    threadPinnedRef.current = true;
     setInput("");
     setError("");
     setBusy(true);
@@ -1358,7 +1376,11 @@ export default function App() {
             </button>
           </div>
         </header>
-        <div className="thread-scroll">
+        <div
+          className="thread-scroll"
+          ref={threadScrollRef}
+          onScroll={handleThreadScroll}
+        >
           <section className="thread">
             {!messages.length && (
               <div className="empty-state">

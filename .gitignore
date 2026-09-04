@@ -26,3 +26,5 @@ frontend/vite.config.d.ts
 # Local working files
 .qwen/
 .qwen-*
+test-results/
+.trae/

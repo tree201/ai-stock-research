@@ -98,13 +98,13 @@ body { background:var(--paper); color:var(--ink); }
 .company-node:hover { background:#293530; }
 .company-node.selected { background:#2b3934; box-shadow:inset 0 0 0 1px #3c554c; }
 .tree-toggle { color:#74827c; }
-.company-main { padding:10px 10px 10px 0; }
+.company-main { padding:5px 10px 5px 0; }
 .company-title { gap:6px; }
 .company-title strong { color:#f0f5f2; font-size:12px; }
 .company-symbol,.company-market { color:#8d9b95; }
 .company-title em { background:#3a4943; color:#b8c9c1; }
 .session-tree { margin-left:14px; padding-left:12px; border-left-color:#3a4742; }
-.session-node { color:#a8b4ae; padding:8px; }
+.session-node { color:#a8b4ae; padding:5px 8px; }
 .session-node:hover,.session-node.selected { background:#293530; color:#edf5f0; }
 .session-node.selected .session-icon { color:#73c7ad; }
 .session-node.selected .session-marker { background:#44b492; }

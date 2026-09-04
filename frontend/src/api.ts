@@ -45,7 +45,19 @@ export const api = {
   article: (url: string) => request<ArticleReader>(`/api/article?url=${encodeURIComponent(url)}`),
   settings: () => request<ModelSettings>('/api/settings'),
   saveSettings: (settings: ModelSettings) => request<ModelSettings>('/api/settings', { method: 'POST', body: JSON.stringify(settings) }),
+  llmConfig: () => request<LlmConfig>('/api/llm/config'),
+  saveLlmProvider: (payload: { id?: number; name: string; base_url: string; api_key?: string }) => request<{ ok?: boolean; provider: LlmProvider; config: LlmConfig }>('/api/llm/providers', { method: 'POST', body: JSON.stringify(payload) }),
+  removeLlmProvider: (id: number) => request<{ ok: boolean; config: LlmConfig }>(`/api/llm/providers/${id}`, { method: 'DELETE' }),
+  addLlmModel: (payload: { provider_id: number; model_id: string; display_name?: string; thinking_levels?: Record<string, Record<string, unknown>> }) => request<{ ok: boolean; config: LlmConfig }>('/api/llm/models', { method: 'POST', body: JSON.stringify(payload) }),
+  removeLlmModel: (id: number) => request<{ ok: boolean; config: LlmConfig }>(`/api/llm/models/${id}`, { method: 'DELETE' }),
+  setLlmSelection: (payload: { model_row_id: number; level: string }) => request<{ ok: boolean; config: LlmConfig }>('/api/llm/selection', { method: 'POST', body: JSON.stringify(payload) }),
 };
+
+export type LlmProvider = { id: number; name: string; base_url: string; has_api_key: boolean; builtin: number; enabled: number };
+export type LlmModel = { id: number; provider_id: number; model_id: string; display_name: string; thinking_levels: Record<string, Record<string, unknown>>; levels: string[] };
+export type LlmLevelOption = { value: string; label: string };
+export type LlmSelectionEntry = { model_row_id: number; provider_id: number; provider_name: string; model_id: string; display_name: string; level: string; has_api_key: boolean };
+export type LlmConfig = { providers: LlmProvider[]; models: LlmModel[]; levels: LlmLevelOption[]; selection: LlmSelectionEntry | null; recent: LlmSelectionEntry[] };
 
 export type ChatResult = { type: string; session_id: string; message?: string; report?: Report; job_id?: string; run_id?: string; report_id?: string };
 export type ModelSettings = { provider: string; base_url: string; model: string; api_key?: string; llm_enabled?: boolean; api_key_configured?: boolean };

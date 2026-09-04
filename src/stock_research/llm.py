@@ -88,14 +88,28 @@ class OpenAICompatibleProvider:
         model: str,
         opener: Callable[..., Any] = urlopen,
         timeout: float = 60.0,
+        extra_params: dict[str, Any] | None = None,
     ) -> None:
         if not base_url.strip() or not api_key.strip() or not model.strip():
             raise ValueError("base_url, api_key and model are required")
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.extra_params = dict(extra_params or {})
         self._opener = opener
         self.timeout = timeout
+
+    def _payload(self, messages: list[dict[str, str]], *, json_mode: bool = False) -> dict[str, Any]:
+        """Base request body; extra_params (强度档位映射) merge in last."""
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "temperature": 0,
+            "messages": messages,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        payload.update(self.extra_params)
+        return payload
 
     def analyze(self, request: AnalysisRequest) -> AnalysisResponse:
         evidence_text = "\n".join(
@@ -114,15 +128,13 @@ class OpenAICompatibleProvider:
             f"Research cutoff: {request.as_of_date.isoformat()}. Question: {request.question}\n"
             f"Evidence:\n{evidence_text}"
         )
-        payload = {
-            "model": self.model,
-            "temperature": 0,
-            "messages": [
+        payload = self._payload(
+            [
                 {"role": "system", "content": "Produce conservative, evidence-grounded financial analysis."},
                 {"role": "user", "content": instruction},
             ],
-            "response_format": {"type": "json_object"},
-        }
+            json_mode=True,
+        )
         started = time.monotonic()
         req = Request(
             f"{self.base_url}/chat/completions",
@@ -160,14 +172,12 @@ class OpenAICompatibleProvider:
             "用简洁中文回答，并在涉及数字时保留原有单位。\n\n"
             f"历史研究报告：\n{context[:24000]}\n\n用户追问：{question}"
         )
-        payload = {
-            "model": self.model,
-            "temperature": 0,
-            "messages": [
+        payload = self._payload(
+            [
                 {"role": "system", "content": "回答必须以提供的研究报告为依据。"},
                 {"role": "user", "content": prompt},
             ],
-        }
+        )
         req = Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -201,14 +211,12 @@ class OpenAICompatibleProvider:
             f"联网搜索结果：\n{sources}\n\n"
             f"用户追问：{question}"
         )
-        payload = {
-            "model": self.model,
-            "temperature": 0,
-            "messages": [
+        payload = self._payload(
+            [
                 {"role": "system", "content": "回答必须以提供的搜索摘要和研究报告为依据，并附来源链接。"},
                 {"role": "user", "content": prompt},
             ],
-        }
+        )
         req = Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -284,6 +292,8 @@ def provider_from_config(config: dict[str, Any] | None) -> LLMProvider | None:
     base_url = str(config.get("base_url") or config.get("baseUrl") or "").strip()
     model = str(config.get("model") or "deepseek-chat").strip()
     provider = str(config.get("provider") or "openai_compatible").casefold()
+    extra = config.get("extra_params")
+    extra_params = dict(extra) if isinstance(extra, dict) else None
     if provider == "deepseek" and (not base_url or base_url == "https://api.deepseek.com/v1"):
         return DeepSeekProvider(key, model)
-    return OpenAICompatibleProvider(base_url or "https://api.deepseek.com/v1", key, model)
+    return OpenAICompatibleProvider(base_url or "https://api.deepseek.com/v1", key, model, extra_params=extra_params)

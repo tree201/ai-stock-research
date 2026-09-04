@@ -20,7 +20,8 @@ from .domain import ResearchProject, ResearchSession, SessionMessage, utc_now
 from .facts import FactCandidate
 from .pipeline import ResearchPipeline
 from .report import ReportBuilder, diff_reports
-from .llm import LLMError, ModelNotConfiguredError, provider_from_config, provider_from_env
+from .llm import LLMError, ModelNotConfiguredError, OpenAICompatibleProvider, provider_from_config, provider_from_env
+from .llm_catalog import LEVEL_LABELS, THINKING_LEVELS, levels_for, normalize_level, params_for_level, parse_thinking_levels
 from .storage import SQLiteStore
 from .trust import DEFAULT_TRUSTED_HOSTS, classify_document, host_in_set
 from .workflow import ResearchWorkflow
@@ -41,10 +42,46 @@ def session_title(text: str, default: str = "长期研究") -> str:
 
 
 def resolve_provider(llm_config: dict[str, Any] | None = None):
-    provider = provider_from_config(llm_config)
+    if llm_config:
+        provider = provider_from_config(llm_config)
+    else:
+        stored = stored_llm_selection()
+        if stored:
+            return OpenAICompatibleProvider(
+                stored["base_url"], stored["api_key"], stored["model"], extra_params=stored["extra_params"]
+            )
+        provider = provider_from_env()
     if provider is None:
         raise ModelNotConfiguredError("尚未配置真实模型，请打开‘设置 → 模型接入’完成配置。")
     return provider
+
+
+def stored_llm_selection() -> dict[str, Any] | None:
+    """当前选中的 (供应商, 模型, 强度档位)；未配置或无密钥时返回 None。"""
+    store = SQLiteStore(database_path())
+    try:
+        selection = store.get_setting("llm.selection")
+        if not isinstance(selection, dict) or not selection.get("model_row_id"):
+            return None
+        model = store.get_llm_model(int(selection["model_row_id"]))
+        if not model or not model.get("enabled"):
+            return None
+        provider = store.get_llm_provider(int(model["provider_id"]))
+        if not provider or not provider.get("api_key"):
+            return None
+        level = normalize_level(selection.get("level"))
+        return {
+            "provider_id": int(provider["id"]),
+            "provider_name": provider["name"],
+            "base_url": provider["base_url"],
+            "api_key": provider["api_key"],
+            "model": model["model_id"],
+            "display_name": model.get("display_name") or model["model_id"],
+            "level": level,
+            "extra_params": params_for_level(model.get("thinking_levels"), level),
+        }
+    finally:
+        store.close()
 
 
 def provider_status() -> dict[str, Any]:
@@ -808,6 +845,148 @@ def remove_trusted_host_payload(host_id: str) -> None:
     store = SQLiteStore(database_path())
     try:
         store.remove_trusted_host(int(host_id))
+    finally:
+        store.close()
+
+
+# --- LLM hub: 供应商/模型统一接入 + 选择状态 -------------------------------------
+
+
+def llm_config_payload() -> dict[str, Any]:
+    """模型接入总览：供应商（密钥脱敏）、模型目录、当前选择与最近使用。"""
+    store = SQLiteStore(database_path())
+    try:
+        providers = store.list_llm_providers()
+        models = store.list_llm_models()
+        selection = store.get_setting("llm.selection")
+        if not isinstance(selection, dict):
+            selection = {}
+        recent_ids = store.get_setting("llm.recent")
+        if not isinstance(recent_ids, list):
+            recent_ids = []
+    finally:
+        store.close()
+
+    providers_out = [
+        {**provider, "api_key": None, "has_api_key": bool(provider.get("api_key"))}
+        for provider in providers
+    ]
+    models_out = [
+        {
+            "id": model["id"],
+            "provider_id": model["provider_id"],
+            "model_id": model["model_id"],
+            "display_name": model.get("display_name") or model["model_id"],
+            "thinking_levels": parse_thinking_levels(model.get("thinking_levels")),
+            "levels": levels_for(model.get("thinking_levels")),
+        }
+        for model in models
+    ]
+    by_row = {model["id"]: model for model in models_out}
+
+    def _entry(model_row_id: Any, level: Any = "off") -> dict[str, Any] | None:
+        model = by_row.get(int(model_row_id)) if model_row_id is not None else None
+        if not model:
+            return None
+        provider = next((p for p in providers_out if p["id"] == model["provider_id"]), None)
+        if not provider:
+            return None
+        return {
+            "model_row_id": model["id"],
+            "provider_id": provider["id"],
+            "provider_name": provider["name"],
+            "model_id": model["model_id"],
+            "display_name": model["display_name"],
+            "level": normalize_level(level),
+            "has_api_key": provider["has_api_key"],
+        }
+
+    current = _entry(selection.get("model_row_id"), selection.get("level")) if selection else None
+    recent = [entry for entry in (_entry(row_id, "off") for row_id in recent_ids) if entry]
+    return {
+        "providers": providers_out,
+        "models": models_out,
+        "levels": [{"value": level, "label": LEVEL_LABELS[level]} for level in THINKING_LEVELS],
+        "selection": current,
+        "recent": recent,
+    }
+
+
+def save_llm_provider_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """创建或更新供应商；带 id 时为更新（api_key 留空表示不改）。"""
+    store = SQLiteStore(database_path())
+    try:
+        name = str(payload.get("name", "")).strip()
+        base_url = str(payload.get("base_url", "")).strip()
+        api_key = str(payload.get("api_key", "")).strip()
+        provider_id = payload.get("id")
+        if provider_id:
+            fields: dict[str, Any] = {}
+            if name:
+                fields["name"] = name
+            if base_url:
+                fields["base_url"] = base_url
+            if api_key:
+                fields["api_key"] = api_key
+            stored = store.update_llm_provider(int(provider_id), **fields)
+        else:
+            if not api_key:
+                raise ValueError("api_key 必填")
+            stored = store.add_llm_provider(name, base_url, api_key)
+        return {"provider": {**stored, "api_key": None, "has_api_key": bool(stored.get("api_key"))}, "config": llm_config_payload()}
+    finally:
+        store.close()
+
+
+def remove_llm_provider_payload(provider_id: str) -> dict[str, Any]:
+    store = SQLiteStore(database_path())
+    try:
+        store.remove_llm_provider(int(provider_id))
+        return {"ok": True, "config": llm_config_payload()}
+    finally:
+        store.close()
+
+
+def add_llm_model_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    store = SQLiteStore(database_path())
+    try:
+        store.add_llm_model(
+            int(payload.get("provider_id")),
+            str(payload.get("model_id", "")),
+            str(payload.get("display_name") or "") or None,
+            payload.get("thinking_levels"),
+        )
+        return {"ok": True, "config": llm_config_payload()}
+    finally:
+        store.close()
+
+
+def remove_llm_model_payload(model_row_id: str) -> dict[str, Any]:
+    store = SQLiteStore(database_path())
+    try:
+        store.remove_llm_model(int(model_row_id))
+        return {"ok": True, "config": llm_config_payload()}
+    finally:
+        store.close()
+
+
+def set_llm_selection_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """切换当前模型与强度档位；同时维护最近使用（去重，最多 8 条）。"""
+    model_row_id = int(payload.get("model_row_id"))
+    level = normalize_level(payload.get("level"))
+    store = SQLiteStore(database_path())
+    try:
+        model = store.get_llm_model(model_row_id)
+        if not model:
+            raise KeyError("模型不存在")
+        selection = {"model_row_id": model_row_id, "provider_id": model["provider_id"], "model_id": model["model_id"], "level": level}
+        store.set_setting("llm.selection", selection)
+        recent = store.get_setting("llm.recent")
+        if not isinstance(recent, list):
+            recent = []
+        recent = [model_row_id] + [int(row) for row in recent if int(row) != model_row_id]
+        store.set_setting("llm.recent", recent[:8])
+        return {"ok": True, "config": llm_config_payload()}
     finally:
         store.close()
 

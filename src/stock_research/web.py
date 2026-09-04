@@ -15,6 +15,7 @@ from uuid import UUID
 
 from .service import (
     add_company_source,
+    add_llm_model_payload,
     add_trusted_host_payload,
     chat_entry_payload,
     chat_payload,
@@ -22,11 +23,16 @@ from .service import (
     create_project_with_session,
     create_session_for_project,
     history_payload,
+    llm_config_payload,
     provider_status,
     remove_company,
     remove_company_source,
+    remove_llm_model_payload,
+    remove_llm_provider_payload,
     remove_trusted_host_payload,
     run_research_payload,
+    save_llm_provider_payload,
+    set_llm_selection_payload,
     set_session_status,
 )
 
@@ -161,6 +167,8 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
                 self._send(404, b"not found", "text/plain; charset=utf-8")
         elif self.path in {"/api/status", "/api/settings"}:
             self._send(200, json.dumps(provider_status(), ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+        elif self.path == "/api/llm/config":
+            self._send(200, json.dumps(llm_config_payload(), ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
         elif self.path.startswith(("/api/companies", "/api/company-catalog", "/api/company-panel", "/api/article", "/api/quote/", "/api/news", "/api/projects", "/api/search", "/api/runs", "/api/jobs/", "/api/reports/", "/api/sessions/", "/api/trusted-hosts")):
             try:
                 response = history_payload(self.path)
@@ -175,7 +183,7 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-        if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/projects", "/api/trusted-hosts"} and not self.path.startswith(("/api/projects/", "/api/sessions/", "/api/company-panel", "/api/reports/")):
+        if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/projects", "/api/trusted-hosts", "/api/llm/providers", "/api/llm/models", "/api/llm/selection"} and not self.path.startswith(("/api/projects/", "/api/sessions/", "/api/company-panel", "/api/reports/", "/api/llm/providers/")):
             self._send(404, b'{"error":"not found"}', "application/json")
             return
         try:
@@ -212,6 +220,15 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
                 response = add_company_source(symbol, market, url, title, source_class)
             elif self.path == "/api/trusted-hosts":
                 response = add_trusted_host_payload(payload)
+            elif self.path == "/api/llm/providers":
+                response = save_llm_provider_payload(payload)
+            elif self.path.startswith("/api/llm/providers/"):
+                payload["id"] = self.path.rsplit("/", 1)[-1]
+                response = save_llm_provider_payload(payload)
+            elif self.path == "/api/llm/models":
+                response = add_llm_model_payload(payload)
+            elif self.path == "/api/llm/selection":
+                response = set_llm_selection_payload(payload)
             elif self.path == "/api/chat":
                 response = chat_entry_payload(payload)
             else:
@@ -222,6 +239,20 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
             self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
 
     def do_DELETE(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.path.startswith("/api/llm/providers/"):
+            try:
+                response = remove_llm_provider_payload(self.path.rsplit("/", 1)[-1])
+                self._send(200, json.dumps(response, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            return
+        if self.path.startswith("/api/llm/models/"):
+            try:
+                response = remove_llm_model_payload(self.path.rsplit("/", 1)[-1])
+                self._send(200, json.dumps(response, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            return
         if self.path.startswith("/api/trusted-hosts/"):
             try:
                 remove_trusted_host_payload(self.path.rsplit("/", 1)[-1])

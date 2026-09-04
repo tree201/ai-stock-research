@@ -46,7 +46,9 @@ import {
   SearchResult,
   Session,
   TrustedHost,
+  LlmConfig,
 } from "./api";
+import { ModelPicker } from "./ModelPicker";
 
 function relativeTime(value?: string | null): string {
   if (!value) return "";
@@ -650,7 +652,13 @@ export default function App() {
     api_key: "",
   });
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
-  const [modelSaving, setModelSaving] = useState(false);
+  const [llmConfig, setLlmConfig] = useState<LlmConfig | null>(null);
+  const [editingProviderId, setEditingProviderId] = useState<number | null>(null);
+  const [providerForm, setProviderForm] = useState({ name: "", base_url: "", api_key: "" });
+  const [addProviderOpen, setAddProviderOpen] = useState(false);
+  const [newProvider, setNewProvider] = useState({ name: "", base_url: "", api_key: "" });
+  const [newModelRows, setNewModelRows] = useState<Record<number, { model_id: string; display_name: string }>>({});
+  const [llmBusy, setLlmBusy] = useState(false);
   const submittingRef = useRef(false);
   const [newResearchOpen, setNewResearchOpen] = useState(false);
   const [newResearchCompanyKey, setNewResearchCompanyKey] = useState("");
@@ -708,6 +716,15 @@ export default function App() {
   const openSettings = () => {
     setModelSettingsOpen(true);
   };
+
+  useEffect(() => {
+    if (!modelSettingsOpen) return;
+    api.llmConfig().then(setLlmConfig).catch(() => {});
+  }, [modelSettingsOpen]);
+
+  useEffect(() => {
+    api.llmConfig().then(setLlmConfig).catch(() => {});
+  }, []);
 
   const openNewResearch = () => {
     setNewResearchCompanyKey("");
@@ -1158,8 +1175,11 @@ export default function App() {
     event.preventDefault();
     const text = input.trim();
     if (!text || busy || submittingRef.current) return;
-    if (!modelSettings.api_key_configured && !modelSettings.api_key?.trim()) {
-      setError("尚未配置真实模型，请打开‘设置 → 模型接入’完成配置。");
+    const modelReady = llmConfig
+      ? Boolean(llmConfig.selection && llmConfig.selection.has_api_key)
+      : Boolean(modelSettings.api_key_configured || modelSettings.api_key?.trim());
+    if (!modelReady) {
+      setError("尚未配置真实模型，请打开‘设置 → 模型接入’选择模型并配置 API Key。");
       return;
     }
     submittingRef.current = true;
@@ -1175,21 +1195,13 @@ export default function App() {
     };
     setMessages((prev) => [...prev, optimistic]);
     try {
-      const llm = modelSettings.api_key?.trim()
-        ? {
-            provider: modelSettings.provider,
-            base_url: modelSettings.base_url,
-            model: modelSettings.model,
-            api_key: modelSettings.api_key,
-          }
-        : undefined;
+      // 模型与强度档位由后端存储的选择决定（llm.selection），前端不再逐请求携带密钥。
       const result = sessionId
-        ? await api.message(sessionId, text, llm)
+        ? await api.message(sessionId, text)
         : await api.chat({
             name: settings.name,
             symbol: settings.symbol,
             content: text,
-            llm,
           });
       if (result.session_id) {
         setSessionId(result.session_id);
@@ -1407,6 +1419,11 @@ export default function App() {
               </button>
             </div>
           )}
+          <ModelPicker
+            config={llmConfig}
+            onConfigChange={setLlmConfig}
+            onOpenSettings={openSettings}
+          />
           <form className="composer" onSubmit={submit}>
             <textarea
               value={input}
@@ -1947,128 +1964,293 @@ export default function App() {
                 <>
                   <header className="settings-section-head">
                     <h3>模型接入</h3>
-                    <p>配置 OpenAI 兼容接口后，研究会使用真实模型分析。</p>
+                    <p>为常用供应商配置 API Key 后，即可在输入框下方快速切换模型与推理强度。</p>
                   </header>
-                  <div className="settings-card">
-                    <div className="settings-row">
-                      <div className="settings-row-text">
-                        <strong>提供商</strong>
-                        <span>选择模型服务来源</span>
-                      </div>
-                      <div className="settings-row-control">
-                        <Select
-                          className="settings-select"
-                          value={modelSettings.provider}
-                          options={[
-                            { value: "deepseek", label: "DeepSeek" },
-                            { value: "openai_compatible", label: "OpenAI 兼容" },
-                          ]}
-                          onChange={(value) =>
-                            setModelSettings({
-                              ...modelSettings,
-                              provider: value,
-                            })
-                          }
-                        />
-                      </div>
+                  <div className="settings-card llm-card">
+                  {llmConfig && (
+                    <div className="llm-hub">
+                      {llmConfig.providers.map((provider) => {
+                        const models = llmConfig.models.filter(
+                          (model) => model.provider_id === provider.id,
+                        );
+                        const editing = editingProviderId === provider.id;
+                        return (
+                          <div className="llm-provider" key={provider.id}>
+                            <div className="llm-provider-head">
+                              <button
+                                type="button"
+                                className="llm-provider-toggle"
+                                onClick={() => {
+                                  setEditingProviderId(editing ? null : provider.id);
+                                  setProviderForm({
+                                    name: provider.name,
+                                    base_url: provider.base_url,
+                                    api_key: "",
+                                  });
+                                }}
+                              >
+                                <span className="llm-provider-name">{provider.name}</span>
+                                <span className="llm-provider-meta">{provider.base_url}</span>
+                              </button>
+                              <span
+                                className={`llm-key-badge ${provider.has_api_key ? "ok" : "missing"}`}
+                              >
+                                {provider.has_api_key ? "已配置密钥" : "未配置密钥"}
+                              </span>
+                            </div>
+                            {editing && (
+                              <div className="llm-provider-edit">
+                                <label>
+                                  名称
+                                  <input
+                                    value={providerForm.name}
+                                    onChange={(e) =>
+                                      setProviderForm({ ...providerForm, name: e.target.value })
+                                    }
+                                  />
+                                </label>
+                                <label>
+                                  接口地址
+                                  <input
+                                    value={providerForm.base_url}
+                                    onChange={(e) =>
+                                      setProviderForm({ ...providerForm, base_url: e.target.value })
+                                    }
+                                  />
+                                </label>
+                                <label>
+                                  API Key
+                                  <input
+                                    type="password"
+                                    value={providerForm.api_key}
+                                    placeholder={
+                                      provider.has_api_key ? "已配置（留空保持不变）" : "必填"
+                                    }
+                                    onChange={(e) =>
+                                      setProviderForm({ ...providerForm, api_key: e.target.value })
+                                    }
+                                  />
+                                </label>
+                                <div className="llm-row-actions">
+                                  <button
+                                    type="button"
+                                    disabled={llmBusy}
+                                    onClick={async () => {
+                                      setLlmBusy(true);
+                                      try {
+                                        const result = await api.saveLlmProvider({
+                                          id: provider.id,
+                                          name: providerForm.name,
+                                          base_url: providerForm.base_url,
+                                          ...(providerForm.api_key
+                                            ? { api_key: providerForm.api_key }
+                                            : {}),
+                                        });
+                                        setLlmConfig(result.config);
+                                        setEditingProviderId(null);
+                                      } catch (err) {
+                                        setError(
+                                          err instanceof Error ? err.message : "供应商保存失败",
+                                        );
+                                      } finally {
+                                        setLlmBusy(false);
+                                      }
+                                    }}
+                                  >
+                                    保存
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="danger"
+                                    disabled={llmBusy}
+                                    onClick={async () => {
+                                      setLlmBusy(true);
+                                      try {
+                                        const result = await api.removeLlmProvider(provider.id);
+                                        setLlmConfig(result.config);
+                                        setEditingProviderId(null);
+                                      } catch (err) {
+                                        setError(
+                                          err instanceof Error ? err.message : "供应商删除失败",
+                                        );
+                                      } finally {
+                                        setLlmBusy(false);
+                                      }
+                                    }}
+                                  >
+                                    删除供应商
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                            <div className="llm-model-list">
+                              {models.map((model) => (
+                                <div className="llm-model-row" key={model.id}>
+                                  <span className="llm-model-name">{model.display_name}</span>
+                                  <span className="llm-model-meta">
+                                    {model.levels.length
+                                      ? `${model.levels.length} 档强度`
+                                      : "固定模式"}
+                                  </span>
+                                  {llmConfig.selection?.model_row_id === model.id && (
+                                    <span className="llm-model-current">当前</span>
+                                  )}
+                                  <button
+                                    type="button"
+                                    className="llm-model-remove"
+                                    aria-label={`删除 ${model.display_name}`}
+                                    disabled={llmBusy}
+                                    onClick={async () => {
+                                      setLlmBusy(true);
+                                      try {
+                                        const result = await api.removeLlmModel(model.id);
+                                        setLlmConfig(result.config);
+                                      } catch (err) {
+                                        setError(
+                                          err instanceof Error ? err.message : "模型删除失败",
+                                        );
+                                      } finally {
+                                        setLlmBusy(false);
+                                      }
+                                    }}
+                                  >
+                                    <Trash2 size={12} />
+                                  </button>
+                                </div>
+                              ))}
+                              <div className="llm-model-add">
+                                <input
+                                  placeholder="模型 ID，如 glm-4.6"
+                                  value={newModelRows[provider.id]?.model_id ?? ""}
+                                  onChange={(e) =>
+                                    setNewModelRows({
+                                      ...newModelRows,
+                                      [provider.id]: {
+                                        ...(newModelRows[provider.id] ?? { display_name: "" }),
+                                        model_id: e.target.value,
+                                      },
+                                    })
+                                  }
+                                />
+                                <input
+                                  placeholder="显示名（可选）"
+                                  value={newModelRows[provider.id]?.display_name ?? ""}
+                                  onChange={(e) =>
+                                    setNewModelRows({
+                                      ...newModelRows,
+                                      [provider.id]: {
+                                        ...(newModelRows[provider.id] ?? { model_id: "" }),
+                                        display_name: e.target.value,
+                                      },
+                                    })
+                                  }
+                                />
+                                <button
+                                  type="button"
+                                  disabled={
+                                    llmBusy || !(newModelRows[provider.id]?.model_id ?? "").trim()
+                                  }
+                                  onClick={async () => {
+                                    setLlmBusy(true);
+                                    try {
+                                      const result = await api.addLlmModel({
+                                        provider_id: provider.id,
+                                        model_id: (newModelRows[provider.id]?.model_id ?? "").trim(),
+                                        display_name:
+                                          (newModelRows[provider.id]?.display_name ?? "").trim() ||
+                                          undefined,
+                                      });
+                                      setLlmConfig(result.config);
+                                      setNewModelRows({
+                                        ...newModelRows,
+                                        [provider.id]: { model_id: "", display_name: "" },
+                                      });
+                                    } catch (err) {
+                                      setError(
+                                        err instanceof Error ? err.message : "模型添加失败",
+                                      );
+                                    } finally {
+                                      setLlmBusy(false);
+                                    }
+                                  }}
+                                >
+                                  <Plus size={12} /> 添加
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {addProviderOpen ? (
+                        <div className="llm-provider-edit">
+                          <label>
+                            名称
+                            <input
+                              value={newProvider.name}
+                              placeholder="如 SiliconFlow"
+                              onChange={(e) =>
+                                setNewProvider({ ...newProvider, name: e.target.value })
+                              }
+                            />
+                          </label>
+                          <label>
+                            接口地址（OpenAI 兼容）
+                            <input
+                              value={newProvider.base_url}
+                              placeholder="https://api.example.com/v1"
+                              onChange={(e) =>
+                                setNewProvider({ ...newProvider, base_url: e.target.value })
+                              }
+                            />
+                          </label>
+                          <label>
+                            API Key
+                            <input
+                              type="password"
+                              value={newProvider.api_key}
+                              onChange={(e) =>
+                                setNewProvider({ ...newProvider, api_key: e.target.value })
+                              }
+                            />
+                          </label>
+                          <div className="llm-row-actions">
+                            <button
+                              type="button"
+                              disabled={llmBusy}
+                              onClick={async () => {
+                                setLlmBusy(true);
+                                try {
+                                  const result = await api.saveLlmProvider(newProvider);
+                                  setLlmConfig(result.config);
+                                  setAddProviderOpen(false);
+                                  setNewProvider({ name: "", base_url: "", api_key: "" });
+                                } catch (err) {
+                                  setError(
+                                    err instanceof Error ? err.message : "供应商添加失败",
+                                  );
+                                } finally {
+                                  setLlmBusy(false);
+                                }
+                              }}
+                            >
+                              保存
+                            </button>
+                            <button type="button" onClick={() => setAddProviderOpen(false)}>
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="llm-add-provider"
+                          onClick={() => setAddProviderOpen(true)}
+                        >
+                          <Plus size={13} /> 添加自定义供应商
+                        </button>
+                      )}
                     </div>
-                    <div className="settings-row">
-                      <div className="settings-row-text">
-                        <strong>接口地址</strong>
-                        <span>OpenAI 兼容 API 的基础地址</span>
-                      </div>
-                      <div className="settings-row-control">
-                        <input
-                          value={modelSettings.base_url}
-                          onChange={(e) =>
-                            setModelSettings({
-                              ...modelSettings,
-                              base_url: e.target.value,
-                            })
-                          }
-                          placeholder="https://api.deepseek.com/v1"
-                        />
-                      </div>
-                    </div>
-                    <div className="settings-row">
-                      <div className="settings-row-text">
-                        <strong>模型</strong>
-                        <span>用于研究的模型名称</span>
-                      </div>
-                      <div className="settings-row-control">
-                        <input
-                          value={modelSettings.model}
-                          onChange={(e) =>
-                            setModelSettings({ ...modelSettings, model: e.target.value })
-                          }
-                          placeholder="deepseek-chat"
-                        />
-                      </div>
-                    </div>
-                    <div className="settings-row">
-                      <div className="settings-row-text">
-                        <strong>API Key</strong>
-                        <span>只保存在当前浏览器会话</span>
-                      </div>
-                      <div className="settings-row-control">
-                        <input
-                          type="password"
-                          value={modelSettings.api_key || ""}
-                          onChange={(e) =>
-                            setModelSettings({
-                              ...modelSettings,
-                              api_key: e.target.value,
-                              api_key_configured: Boolean(e.target.value),
-                            })
-                          }
-                          placeholder={
-                            modelSettings.api_key_configured
-                              ? "已配置（重新输入可替换）"
-                              : "sk-…"
-                          }
-                        />
-                      </div>
-                    </div>
-                  </div>
-                  <div className="settings-footer">
-                    <span
-                      className={
-                        modelSettings.api_key || modelSettings.api_key_configured
-                          ? "configured"
-                          : "unconfigured"
-                      }
-                    >
-                      {modelSettings.api_key || modelSettings.api_key_configured
-                        ? "已配置真实模型"
-                        : "未配置真实模型"}
-                    </span>
-                    <Button
-                      type="primary"
-                      loading={modelSaving}
-                      onClick={async () => {
-                        setModelSaving(true);
-                        try {
-                          const savePayload = { ...modelSettings };
-                          if (!savePayload.api_key) delete savePayload.api_key;
-                          const status = await api.saveSettings(savePayload);
-                          setModelSettings((current) => ({
-                            ...current,
-                            ...status,
-                            api_key: current.api_key,
-                          }));
-                          setError("");
-                          setModelSettingsOpen(false);
-                        } catch (err) {
-                          setError(
-                            err instanceof Error ? err.message : "模型设置保存失败",
-                          );
-                        } finally {
-                          setModelSaving(false);
-                        }
-                      }}
-                    >
-                      保存设置
-                    </Button>
+                  )}
                   </div>
                 </>
               )}

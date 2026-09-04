@@ -16,7 +16,7 @@ export default defineConfig({
     ? undefined
     : {
         command:
-          "PYTHONPATH=src AI_STOCK_DB=/tmp/ai-stock-e2e.sqlite3 /usr/local/bin/python3.11 -m stock_research --web --port 8011",
+          "rm -f /tmp/ai-stock-e2e.sqlite3 && PYTHONPATH=src AI_STOCK_DB=/tmp/ai-stock-e2e.sqlite3 /usr/local/bin/python3.11 -m stock_research --web --port 8011",
         port: 8011,
         reuseExistingServer: true,
         cwd: "..",

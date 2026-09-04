@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Button, Badge, Dropdown, Modal, Select, Tabs } from "antd";
+import { App as AntdApp, Button, Badge, ConfigProvider, Dropdown, Modal, Select, Tabs, theme as antdTheme } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -566,6 +566,17 @@ function storedWidth(key: string, fallback: number, min: number, max: number) {
 }
 
 export default function App() {
+  const [theme, setTheme] = useState<"light" | "dark">(() =>
+    localStorage.getItem("theme") === "dark" ? "dark" : "light",
+  );
+  const [settingsSection, setSettingsSection] = useState<
+    "model" | "appearance"
+  >("model");
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+  const { modal } = AntdApp.useApp();
   const [companies, setCompanies] = useState<Company[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(() =>
@@ -1013,7 +1024,7 @@ export default function App() {
   }
 
   async function removeCompanyConfirmed(company: Company) {
-    Modal.confirm({
+    modal.confirm({
       title: `移除「${company.name}」？`,
       content:
         "将永久删除该公司的全部会话、研究报告和资料，操作不可恢复。",
@@ -1219,6 +1230,15 @@ export default function App() {
   }
 
   return (
+    <ConfigProvider
+      theme={{
+        algorithm:
+          theme === "dark"
+            ? antdTheme.darkAlgorithm
+            : antdTheme.defaultAlgorithm,
+      }}
+    >
+    <AntdApp>
     <div className="app-shell" style={shellStyle}>
       <aside className={`sidebar ${sidebarCollapsed ? "is-collapsed" : ""}`}>
         <div className="workspace-switcher">
@@ -1877,9 +1897,46 @@ export default function App() {
             </div>
             <div className="settings-layout">
               <nav className="settings-nav" aria-label="设置分类">
-                <button className="active" type="button">模型接入</button>
+                <button
+                  className={settingsSection === "model" ? "active" : ""}
+                  type="button"
+                  onClick={() => setSettingsSection("model")}
+                >
+                  模型接入
+                </button>
+                <button
+                  className={settingsSection === "appearance" ? "active" : ""}
+                  type="button"
+                  onClick={() => setSettingsSection("appearance")}
+                >
+                  外观
+                </button>
               </nav>
               <div className="settings-content">
+                {settingsSection === "appearance" ? (
+                  <div className="model-settings-content">
+                    <h3>外观</h3>
+                    <p>切换亮色与暗色皮肤，立即生效并记住选择。</p>
+                    <div className="appearance-options">
+                      <button
+                        type="button"
+                        className={`appearance-option ${theme === "light" ? "active" : ""}`}
+                        onClick={() => setTheme("light")}
+                      >
+                        <span className="appearance-swatch appearance-swatch-light" />
+                        <span>亮色</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={`appearance-option ${theme === "dark" ? "active" : ""}`}
+                        onClick={() => setTheme("dark")}
+                      >
+                        <span className="appearance-swatch appearance-swatch-dark" />
+                        <span>暗色</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
                 <div className="model-settings-content">
                   <h3>模型接入</h3>
                   <p>配置 OpenAI 兼容接口后，研究会使用真实模型分析。</p>
@@ -1982,11 +2039,14 @@ export default function App() {
               </button>
             </div>
                 </div>
+                )}
               </div>
             </div>
           </div>
         </div>
       )}
     </div>
+    </AntdApp>
+    </ConfigProvider>
   );
 }

@@ -1902,16 +1902,16 @@ export default function App() {
       {modelSettingsOpen && (
         <div className="settings-overlay" role="dialog" aria-modal="true">
           <div className="settings-dialog">
+            <button
+              className="modal-close settings-close"
+              onClick={() => setModelSettingsOpen(false)}
+              aria-label="关闭设置"
+            >
+              ×
+            </button>
             <div className="settings-sidebar">
               <div className="settings-sidebar-title">
                 <h2>设置</h2>
-                <button
-                  className="modal-close"
-                  onClick={() => setModelSettingsOpen(false)}
-                  aria-label="关闭"
-                >
-                  ×
-                </button>
               </div>
               <nav className="settings-nav" aria-label="设置分类">
                 <button

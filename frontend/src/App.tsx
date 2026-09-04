@@ -8,6 +8,7 @@ import {
   useState,
 } from "react";
 import { App as AntdApp, Button, Badge, ConfigProvider, Dropdown, Modal, Select, Tabs, theme as antdTheme } from "antd";
+import { ANTD_THEME_TOKENS, ThemeName, applyTheme, initialTheme } from "./theme";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -566,14 +567,12 @@ function storedWidth(key: string, fallback: number, min: number, max: number) {
 }
 
 export default function App() {
-  const [theme, setTheme] = useState<"light" | "dark">(() =>
-    localStorage.getItem("theme") === "dark" ? "dark" : "light",
-  );
+  const [theme, setTheme] = useState<ThemeName>(initialTheme);
   const [settingsSection, setSettingsSection] = useState<
     "model" | "appearance"
   >("model");
   useEffect(() => {
-    document.documentElement.dataset.theme = theme;
+    applyTheme(theme);
     localStorage.setItem("theme", theme);
   }, [theme]);
   const { modal } = AntdApp.useApp();
@@ -1232,6 +1231,7 @@ export default function App() {
   return (
     <ConfigProvider
       theme={{
+        token: ANTD_THEME_TOKENS[theme],
         algorithm:
           theme === "dark"
             ? antdTheme.darkAlgorithm

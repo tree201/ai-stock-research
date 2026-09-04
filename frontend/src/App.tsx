@@ -1340,7 +1340,7 @@ export default function App() {
             >
               <Badge dot={newReportBadge} color="#c2410c" offset={[-3, 3]}>
                 <span className="panel-toggle-inner">
-                  <FileText size={14} /> 公司档案
+                  <FileText size={14} /> 公司详情
                 </span>
               </Badge>
             </button>
@@ -1433,11 +1433,11 @@ export default function App() {
           <aside className="company-panel">
           <div className="report-panel-heading">
             <div>
-              <strong>{panelCompany?.name || companyName || "公司档案"}</strong>
+              <strong>{panelCompany?.name || companyName || "公司详情"}</strong>
               <small>
                 {panelCompany
                   ? `${panelCompany.symbol} · ${panelCompany.market}`
-                  : "选择公司后展示档案"}
+                  : "选择公司后展示详情"}
               </small>
             </div>
             <button onClick={() => setPanelOpen(false)} aria-label="收起档案">

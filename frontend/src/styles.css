@@ -83,7 +83,7 @@
 :root { --ink:#1c2421; --muted:#75807b; --paper:#f8f9f6; --panel:#ffffff; --line:#e2e7e2; --rail:#1d2422; --rail-muted:#9ba6a1; --signal:#17856e; --signal-soft:#e2f2ed; --warm:#c88a45; }
 body { background:var(--paper); color:var(--ink); }
 .app-shell { background:var(--paper); }
-.sidebar { width:248px; flex-basis:248px; background:var(--rail); border-right:1px solid #303936; padding:18px 12px 14px; }
+.sidebar { width: var(--sidebar-width, 248px); flex: 0 0 var(--sidebar-width, 248px); background:var(--rail); border-right:1px solid #303936; padding:18px 12px 14px; }
 .sidebar.is-collapsed { width:64px; flex-basis:64px; }
 .workspace-switcher { height:38px; padding:2px 8px; }
 .workspace-copy strong { color:#f0f5f1; font-size:16px; letter-spacing:.04em; }

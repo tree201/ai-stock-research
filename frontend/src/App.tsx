@@ -526,7 +526,7 @@ function CompanyTree({
   );
 }
 
-const DEFAULT_SIDEBAR_WIDTH = 276;
+const DEFAULT_SIDEBAR_WIDTH = 248;
 const DEFAULT_PANEL_WIDTH = 380;
 const SIDEBAR_MIN = 200;
 const SIDEBAR_MAX = 520;

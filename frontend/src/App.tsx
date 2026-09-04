@@ -19,6 +19,8 @@ import {
   FileText,
   ListTodo,
   MessageSquare,
+  Palette,
+  Server,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -1883,25 +1885,24 @@ export default function App() {
       {modelSettingsOpen && (
         <div className="settings-overlay" role="dialog" aria-modal="true">
           <div className="settings-dialog">
-            <div className="model-settings-heading">
-              <div>
+            <div className="settings-sidebar">
+              <div className="settings-sidebar-title">
                 <h2>设置</h2>
+                <button
+                  className="modal-close"
+                  onClick={() => setModelSettingsOpen(false)}
+                  aria-label="关闭"
+                >
+                  ×
+                </button>
               </div>
-              <button
-                className="modal-close"
-                onClick={() => setModelSettingsOpen(false)}
-                aria-label="关闭"
-              >
-                ×
-              </button>
-            </div>
-            <div className="settings-layout">
               <nav className="settings-nav" aria-label="设置分类">
                 <button
                   className={settingsSection === "model" ? "active" : ""}
                   type="button"
                   onClick={() => setSettingsSection("model")}
                 >
+                  <Server size={14} />
                   模型接入
                 </button>
                 <button
@@ -1909,14 +1910,19 @@ export default function App() {
                   type="button"
                   onClick={() => setSettingsSection("appearance")}
                 >
+                  <Palette size={14} />
                   外观
                 </button>
               </nav>
-              <div className="settings-content">
-                {settingsSection === "appearance" ? (
-                  <div className="model-settings-content">
+            </div>
+            <div className="settings-main">
+              {settingsSection === "appearance" ? (
+                <>
+                  <header className="settings-section-head">
                     <h3>外观</h3>
                     <p>切换亮色与暗色皮肤，立即生效并记住选择。</p>
+                  </header>
+                  <div className="settings-card appearance-card">
                     <div className="appearance-options">
                       <button
                         type="button"
@@ -1936,111 +1942,136 @@ export default function App() {
                       </button>
                     </div>
                   </div>
-                ) : (
-                <div className="model-settings-content">
-                  <h3>模型接入</h3>
-                  <p>配置 OpenAI 兼容接口后，研究会使用真实模型分析。</p>
-            <label>
-              提供商
-              <Select
-                className="settings-select"
-                value={modelSettings.provider}
-                options={[
-                  { value: "deepseek", label: "DeepSeek" },
-                  { value: "openai_compatible", label: "OpenAI 兼容" },
-                ]}
-                onChange={(value) =>
-                  setModelSettings({
-                    ...modelSettings,
-                    provider: value,
-                  })
-                }
-              />
-            </label>
-            <label>
-              接口地址
-              <input
-                value={modelSettings.base_url}
-                onChange={(e) =>
-                  setModelSettings({
-                    ...modelSettings,
-                    base_url: e.target.value,
-                  })
-                }
-                placeholder="https://api.deepseek.com/v1"
-              />
-            </label>
-            <label>
-              模型
-              <input
-                value={modelSettings.model}
-                onChange={(e) =>
-                  setModelSettings({ ...modelSettings, model: e.target.value })
-                }
-                placeholder="deepseek-chat"
-              />
-            </label>
-            <label>
-              API Key
-              <input
-                type="password"
-                value={modelSettings.api_key || ""}
-                onChange={(e) =>
-                  setModelSettings({
-                    ...modelSettings,
-                    api_key: e.target.value,
-                    api_key_configured: Boolean(e.target.value),
-                  })
-                }
-                placeholder={
-                  modelSettings.api_key_configured
-                    ? "已配置（重新输入可替换）"
-                    : "只保存在当前浏览器会话"
-                }
-              />
-            </label>
-            <div className="model-settings-actions">
-              <span
-                className={
-                  modelSettings.api_key || modelSettings.api_key_configured
-                    ? "configured"
-                    : "unconfigured"
-                }
-              >
-                {modelSettings.api_key || modelSettings.api_key_configured
-                  ? "已配置真实模型"
-                  : "未配置真实模型"}
-              </span>
-              <button
-                disabled={modelSaving}
-                onClick={async () => {
-                  setModelSaving(true);
-                  try {
-                    const savePayload = { ...modelSettings };
-                    if (!savePayload.api_key) delete savePayload.api_key;
-                    const status = await api.saveSettings(savePayload);
-                    setModelSettings((current) => ({
-                      ...current,
-                      ...status,
-                      api_key: current.api_key,
-                    }));
-                    setError("");
-                    setModelSettingsOpen(false);
-                  } catch (err) {
-                    setError(
-                      err instanceof Error ? err.message : "模型设置保存失败",
-                    );
-                  } finally {
-                    setModelSaving(false);
-                  }
-                }}
-              >
-                {modelSaving ? "保存中…" : "保存设置"}
-              </button>
-            </div>
-                </div>
-                )}
-              </div>
+                </>
+              ) : (
+                <>
+                  <header className="settings-section-head">
+                    <h3>模型接入</h3>
+                    <p>配置 OpenAI 兼容接口后，研究会使用真实模型分析。</p>
+                  </header>
+                  <div className="settings-card">
+                    <div className="settings-row">
+                      <div className="settings-row-text">
+                        <strong>提供商</strong>
+                        <span>选择模型服务来源</span>
+                      </div>
+                      <div className="settings-row-control">
+                        <Select
+                          className="settings-select"
+                          value={modelSettings.provider}
+                          options={[
+                            { value: "deepseek", label: "DeepSeek" },
+                            { value: "openai_compatible", label: "OpenAI 兼容" },
+                          ]}
+                          onChange={(value) =>
+                            setModelSettings({
+                              ...modelSettings,
+                              provider: value,
+                            })
+                          }
+                        />
+                      </div>
+                    </div>
+                    <div className="settings-row">
+                      <div className="settings-row-text">
+                        <strong>接口地址</strong>
+                        <span>OpenAI 兼容 API 的基础地址</span>
+                      </div>
+                      <div className="settings-row-control">
+                        <input
+                          value={modelSettings.base_url}
+                          onChange={(e) =>
+                            setModelSettings({
+                              ...modelSettings,
+                              base_url: e.target.value,
+                            })
+                          }
+                          placeholder="https://api.deepseek.com/v1"
+                        />
+                      </div>
+                    </div>
+                    <div className="settings-row">
+                      <div className="settings-row-text">
+                        <strong>模型</strong>
+                        <span>用于研究的模型名称</span>
+                      </div>
+                      <div className="settings-row-control">
+                        <input
+                          value={modelSettings.model}
+                          onChange={(e) =>
+                            setModelSettings({ ...modelSettings, model: e.target.value })
+                          }
+                          placeholder="deepseek-chat"
+                        />
+                      </div>
+                    </div>
+                    <div className="settings-row">
+                      <div className="settings-row-text">
+                        <strong>API Key</strong>
+                        <span>只保存在当前浏览器会话</span>
+                      </div>
+                      <div className="settings-row-control">
+                        <input
+                          type="password"
+                          value={modelSettings.api_key || ""}
+                          onChange={(e) =>
+                            setModelSettings({
+                              ...modelSettings,
+                              api_key: e.target.value,
+                              api_key_configured: Boolean(e.target.value),
+                            })
+                          }
+                          placeholder={
+                            modelSettings.api_key_configured
+                              ? "已配置（重新输入可替换）"
+                              : "sk-…"
+                          }
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="settings-footer">
+                    <span
+                      className={
+                        modelSettings.api_key || modelSettings.api_key_configured
+                          ? "configured"
+                          : "unconfigured"
+                      }
+                    >
+                      {modelSettings.api_key || modelSettings.api_key_configured
+                        ? "已配置真实模型"
+                        : "未配置真实模型"}
+                    </span>
+                    <Button
+                      type="primary"
+                      loading={modelSaving}
+                      onClick={async () => {
+                        setModelSaving(true);
+                        try {
+                          const savePayload = { ...modelSettings };
+                          if (!savePayload.api_key) delete savePayload.api_key;
+                          const status = await api.saveSettings(savePayload);
+                          setModelSettings((current) => ({
+                            ...current,
+                            ...status,
+                            api_key: current.api_key,
+                          }));
+                          setError("");
+                          setModelSettingsOpen(false);
+                        } catch (err) {
+                          setError(
+                            err instanceof Error ? err.message : "模型设置保存失败",
+                          );
+                        } finally {
+                          setModelSaving(false);
+                        }
+                      }}
+                    >
+                      保存设置
+                    </Button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>

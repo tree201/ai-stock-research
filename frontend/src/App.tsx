@@ -25,6 +25,7 @@ import {
   Search,
   Settings,
   Sparkles,
+  Trash2,
 } from "lucide-react";
 import {
   api,
@@ -502,6 +503,7 @@ function CompanyTree({
                           key: "remove",
                           label: "移除该公司",
                           danger: true,
+                          icon: <Trash2 size={13} />,
                           onClick: () => onRemoveCompany(company),
                         },
                       ],

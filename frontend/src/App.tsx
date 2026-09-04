@@ -534,7 +534,7 @@ const PANEL_MIN = 300;
 const PANEL_MAX = 720;
 
 function storedWidth(key: string, fallback: number, min: number, max: number) {
-  const stored = Number(localStorage.getItem(key));
+  const stored = Math.round(Number(localStorage.getItem(key)));
   return Number.isFinite(stored) && stored >= min && stored <= max
     ? stored
     : fallback;
@@ -634,27 +634,32 @@ export default function App() {
     const start = {
       side,
       startX: event.clientX,
-      startWidth: side === "left" ? sidebarWidth : panelWidth,
+      startWidth: Math.round(side === "left" ? sidebarWidth : panelWidth),
     };
     document.body.classList.add("is-resizing");
     const onMove = (ev: PointerEvent) => {
-      const delta =
+      const delta = Math.round(
         start.side === "left"
           ? ev.clientX - start.startX
-          : start.startX - ev.clientX;
+          : start.startX - ev.clientX,
+      );
       if (start.side === "left") {
         setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, start.startWidth + delta)));
       } else {
         setPanelWidth(Math.min(PANEL_MAX, Math.max(PANEL_MIN, start.startWidth + delta)));
       }
     };
-    const onUp = () => {
-      document.removeEventListener("pointermove", onMove);
-      document.removeEventListener("pointerup", onUp);
+    // pointerup can be lost when the cursor leaves the window (e.g. over
+    // DevTools); pointercancel + window scope make sure listeners never leak.
+    const finish = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
       document.body.classList.remove("is-resizing");
     };
-    document.addEventListener("pointermove", onMove);
-    document.addEventListener("pointerup", onUp);
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
   }
 
   const shellStyle = {

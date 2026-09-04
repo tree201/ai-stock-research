@@ -127,7 +127,7 @@ body { background:var(--paper); color:var(--ink); }
 .message-row { margin-bottom:28px; }
 .message-bubble { color:#2a3530; font-size:14px; line-height:1.75; }
 .message-row.is-user .message-bubble { background:#e9efec; color:#20332b; border:1px solid #d9e3de; border-radius:14px 14px 4px 14px; padding:11px 16px; }
-.composer-wrap { left: calc(var(--sidebar-width, 276px) + var(--composer-offset, 0px)); padding:22px 32px 18px; background:linear-gradient(transparent,var(--paper) 28%); }
+.composer-wrap { left: var(--sidebar-width, 276px); padding:22px 32px 18px; background:linear-gradient(transparent,var(--paper) 28%); }
 .composer-wrap.panel-open { right: var(--panel-width, 380px); }
 .drag-handle { flex:0 0 6px; width:6px; cursor:col-resize; background:#00000012; transition:background .15s; z-index:5; }
 .drag-handle:hover, body.is-resizing .drag-handle { background:#10a37f66; }

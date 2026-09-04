@@ -475,10 +475,10 @@ class WebMvpTests(unittest.TestCase):
     def test_news_endpoint_uses_keyless_search(self) -> None:
         class FakeNews:
             def __init__(self):
-                self.query = ""
+                self.queries: list[str] = []
 
             def search(self, query, max_results=5):
-                self.query = query
+                self.queries.append(query)
                 return [
                     SearchResult(
                         title="t", url="https://example.com", snippet="s",
@@ -497,7 +497,59 @@ class WebMvpTests(unittest.TestCase):
         self.assertFalse(news[0]["external"])
         self.assertTrue(news[1]["external"])
         self.assertIn("news.google.com", news[1]["url"])
-        self.assertEqual(fake.query, "CKH HOLDINGS 最新")
+        self.assertEqual(fake.queries, ["CKH HOLDINGS 最新", "CKH HOLDINGS"])
+
+    def test_news_default_merges_and_dedupes_queries(self) -> None:
+        class FakeNews:
+            def search(self, query, max_results=5):
+                if "最新" in query:
+                    return [
+                        SearchResult(title="a", url="https://example.com/a", snippet="s"),
+                    ]
+                return [
+                    SearchResult(title="b", url="https://example.com/b", snippet="s"),
+                    SearchResult(title="a-duplicate", url="https://example.com/a", snippet="s"),
+                ]
+
+        with patch("stock_research.service.GoogleNewsSearch", return_value=FakeNews()):
+            news = history_payload("/api/news?name=长江和记&symbol=00001")
+        self.assertEqual([item["url"] for item in news], ["https://example.com/a", "https://example.com/b"])
+
+    def test_news_search_scopes_to_company_with_raw_fallback(self) -> None:
+        class FakeNews:
+            def __init__(self):
+                self.queries: list[str] = []
+
+            def search(self, query, max_results=5):
+                self.queries.append(query)
+                if query == "长江和记 巴拿马":
+                    return [SearchResult(title="scoped", url="https://example.com/scoped", snippet="s")]
+                if query == "巴拿马":
+                    return [SearchResult(title="raw", url="https://example.com/raw", snippet="s")]
+                return []
+
+        fake = FakeNews()
+        with patch("stock_research.service.GoogleNewsSearch", return_value=fake):
+            news = history_payload("/api/news?name=长江和记&symbol=00001&q=%E5%B7%B4%E6%8B%BF%E9%A9%AC")
+        self.assertEqual(fake.queries[0], "长江和记 巴拿马")
+        self.assertEqual(news[0]["url"], "https://example.com/scoped")
+
+    def test_news_search_falls_back_to_raw_query(self) -> None:
+        class FakeNews:
+            def __init__(self):
+                self.queries: list[str] = []
+
+            def search(self, query, max_results=5):
+                self.queries.append(query)
+                if query == "巴拿马":
+                    return [SearchResult(title="raw", url="https://example.com/raw", snippet="s")]
+                return []
+
+        fake = FakeNews()
+        with patch("stock_research.service.GoogleNewsSearch", return_value=fake):
+            news = history_payload("/api/news?name=长江和记&symbol=00001&q=%E5%B7%B4%E6%8B%BF%E9%A9%AC")
+        self.assertEqual(fake.queries, ["长江和记 巴拿马", "巴拿马"])
+        self.assertEqual(news[0]["url"], "https://example.com/raw")
 
     def test_article_endpoint_extracts_readable_text(self) -> None:
         class FakeResponse:

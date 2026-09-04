@@ -36,7 +36,7 @@ export const api = {
   addCompanySource: (symbol: string, market: string, url: string, title?: string) => request<CompanyPanel>(`/api/company-panel/sources`, { method: "POST", body: JSON.stringify({ symbol, market, url, title }) }),
   removeCompanySource: (sourceId: string) => request<{ ok: boolean }>(`/api/company-panel/sources/${sourceId}`, { method: "DELETE" }),
   quote: (symbol: string, market: string) => request<Quote>(`/api/quote/${encodeURIComponent(symbol)}?market=${encodeURIComponent(market)}`),
-  news: (name: string, symbol: string) => request<NewsItem[]>(`/api/news?name=${encodeURIComponent(name)}&symbol=${encodeURIComponent(symbol)}`),
+  news: (name: string, symbol: string, q?: string) => request<NewsItem[]>(`/api/news?name=${encodeURIComponent(name)}&symbol=${encodeURIComponent(symbol)}${q ? `&q=${encodeURIComponent(q)}` : ""}`),
   article: (url: string) => request<ArticleReader>(`/api/article?url=${encodeURIComponent(url)}`),
   settings: () => request<ModelSettings>('/api/settings'),
   saveSettings: (settings: ModelSettings) => request<ModelSettings>('/api/settings', { method: 'POST', body: JSON.stringify(settings) }),

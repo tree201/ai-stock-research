@@ -535,6 +535,9 @@ export default function App() {
   const [panelLoading, setPanelLoading] = useState(false);
   const [newsItems, setNewsItems] = useState<NewsItem[] | null>(null);
   const [newsLoading, setNewsLoading] = useState(false);
+  const [newsQuery, setNewsQuery] = useState("");
+  const [newsSearchActive, setNewsSearchActive] = useState(false);
+  const [visibleNews, setVisibleNews] = useState(15);
   const [newReportBadge, setNewReportBadge] = useState(false);
   const [reportViewer, setReportViewer] = useState<Report | null>(null);
   const [reportLoadingId, setReportLoadingId] = useState<string | null>(null);
@@ -713,24 +716,44 @@ export default function App() {
 
   useEffect(() => {
     if (!panelOpen || panelTab !== "news" || !panelCompany || newsItems) return;
-    let cancelled = false;
-    setNewsLoading(true);
-    api
-      .news(panelCompany.name, panelCompany.symbol)
-      .then((items) => {
-        if (!cancelled) setNewsItems(items);
-      })
-      .catch(() => {
-        if (!cancelled) setNewsItems([]);
-      })
-      .finally(() => {
-        if (!cancelled) setNewsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
+    void loadNews(panelCompany);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [panelOpen, panelTab, panelCompany, newsItems]);
+
+  async function loadNews(
+    company: { name: string; symbol: string } | null,
+    query?: string,
+  ) {
+    if (!company) return;
+    setNewsLoading(true);
+    try {
+      const items = await api.news(
+        company.name,
+        company.symbol,
+        query?.trim() || undefined,
+      );
+      setNewsItems(items);
+      setVisibleNews(15);
+    } catch {
+      setNewsItems([]);
+    } finally {
+      setNewsLoading(false);
+    }
+  }
+
+  async function submitNewsSearch() {
+    if (!panelCompany || newsLoading) return;
+    const q = newsQuery.trim();
+    setNewsSearchActive(!!q);
+    await loadNews(panelCompany, q || undefined);
+  }
+
+  async function clearNewsSearch() {
+    if (!panelCompany || newsLoading) return;
+    setNewsQuery("");
+    setNewsSearchActive(false);
+    await loadNews(panelCompany);
+  }
 
   async function fetchCompanySessions(company: Company) {
     const projectIds = company.project_ids?.length
@@ -851,6 +874,9 @@ export default function App() {
     const [market, symbol] = (companyKey || "").split(":");
     if (market && symbol) {
       setPanelCompany({ name: companyNameValue, symbol, market });
+      setNewsItems(null);
+      setNewsQuery("");
+      setNewsSearchActive(false);
       setNewReportBadge(false);
     }
     const detail = await api.session(session.id);
@@ -1204,7 +1230,21 @@ export default function App() {
               <ChevronRight size={16} />
             </button>
           </div>
-          <div className="company-panel-body">
+          <div
+            className="company-panel-body"
+            onScroll={(e) => {
+              const el = e.currentTarget;
+              if (
+                newsItems &&
+                visibleNews < newsItems.length &&
+                el.scrollTop + el.clientHeight >= el.scrollHeight - 140
+              ) {
+                setVisibleNews((count) =>
+                  Math.min(count + 15, newsItems.length),
+                );
+              }
+            }}
+          >
             <Tabs
               activeKey={panelTab}
               onChange={(key) => setPanelTab(key)}
@@ -1392,39 +1432,76 @@ export default function App() {
                   label: "动态",
                   children: (
                     <div className="panel-section">
+                      <div className="news-search">
+                        <Search size={13} />
+                        <input
+                          value={newsQuery}
+                          placeholder="搜索相关新闻，回车确认…"
+                          onChange={(e) => setNewsQuery(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === "Enter") void submitNewsSearch();
+                          }}
+                        />
+                        {newsQuery.trim() && (
+                          <button
+                            className="news-search-clear"
+                            aria-label="清除搜索"
+                            disabled={newsLoading}
+                            onClick={() => void clearNewsSearch()}
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                      {newsSearchActive && (
+                        <div className="news-search-hint">
+                          「{newsQuery}」的搜索结果
+                        </div>
+                      )}
                       {newsLoading ? (
                         <div className="panel-empty">正在加载动态…</div>
                       ) : (newsItems?.length ?? 0) > 0 ? (
-                        newsItems!.map((item, index) => (
-                          <button
-                            className="news-card"
-                            key={`${item.url}-${index}`}
-                            onClick={() => {
-                              if (item.external) {
-                                window.open(item.url, "_blank", "noopener");
-                                return;
-                              }
-                              void openArticle(item);
-                            }}
-                          >
-                            {item.external && (
-                              <span className="news-external-tag">
-                                <ExternalLink size={10} /> 站外
-                              </span>
-                            )}
-                            <span className="news-title">{item.title}</span>
-                            <span className="news-meta">
-                              {item.source && (
-                                <span className="news-chip">{item.source}</span>
+                        <>
+                          {newsItems!.slice(0, visibleNews).map((item, index) => (
+                            <button
+                              className="news-card"
+                              key={`${item.url}-${index}`}
+                              onClick={() => {
+                                if (item.external) {
+                                  window.open(item.url, "_blank", "noopener");
+                                  return;
+                                }
+                                void openArticle(item);
+                              }}
+                            >
+                              {item.external && (
+                                <span className="news-external-tag">
+                                  <ExternalLink size={10} /> 站外
+                                </span>
                               )}
-                              <span className="news-time">
-                                {relativeTime(item.time)}
+                              <span className="news-title">{item.title}</span>
+                              <span className="news-meta">
+                                {item.source && (
+                                  <span className="news-chip">{item.source}</span>
+                                )}
+                                <span className="news-time">
+                                  {relativeTime(item.time)}
+                                </span>
                               </span>
-                            </span>
-                          </button>
-                        ))
+                            </button>
+                          ))}
+                          <div className="news-load-more">
+                            {visibleNews < newsItems!.length
+                              ? `下滑加载更多（已显示 ${visibleNews}/${newsItems!.length} 条）`
+                              : `已加载全部 ${newsItems!.length} 条`}
+                          </div>
+                        </>
                       ) : (
-                        <div className="panel-empty">暂无相关动态</div>
+                        <div className="panel-empty">
+                          {newsSearchActive
+                            ? "没有找到相关新闻，换个关键词试试"
+                            : "暂无相关动态"}
+                        </div>
                       )}
                     </div>
                   ),

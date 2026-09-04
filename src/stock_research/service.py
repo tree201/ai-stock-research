@@ -578,15 +578,37 @@ def quote_payload(symbol: str, market: str) -> dict[str, Any]:
     }
 
 
-def news_payload(name: str, symbol: str) -> list[dict[str, Any]]:
-    candidates = [f"{name} 最新", name, symbol]
-    for candidate in candidates:
-        if not candidate.strip():
-            continue
-        results = GoogleNewsSearch().search(candidate.strip(), max_results=8)
-        if results:
-            return [_news_item(item) for item in results]
-    return []
+DEFAULT_NEWS_LIMIT = 60
+
+
+def news_payload(name: str, symbol: str, query: str | None = None) -> list[dict[str, Any]]:
+    """Company news from Google News RSS.
+
+    Without a query, ``"{name} 最新"`` and ``{name}`` are merged and deduped
+    by URL for broader coverage (capped at ``DEFAULT_NEWS_LIMIT``); the bare
+    symbol is a last-resort fallback.  With a query, the company-scoped
+    search ``"{name} {query}"`` wins and the raw query is the fallback.
+    """
+    google = GoogleNewsSearch()
+    trimmed = (query or "").strip()
+    if trimmed:
+        for candidate in (f"{name} {trimmed}", trimmed):
+            results = google.search(candidate, max_results=40)
+            if results:
+                return [_news_item(item) for item in results]
+        return []
+    collected: list[Any] = []
+    seen: set[str] = set()
+    for candidate in (f"{name} 最新", name):
+        for item in google.search(candidate, max_results=40):
+            resolved = resolve_google_news_url(item.url)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            collected.append(item)
+    if not collected:
+        collected = list(google.search(symbol, max_results=20))
+    return [_news_item(item) for item in collected[:DEFAULT_NEWS_LIMIT]]
 
 
 def _news_item(item: Any) -> dict[str, Any]:
@@ -734,9 +756,10 @@ def history_payload(path: str) -> dict[str, Any] | list[dict[str, Any]]:
         query = parse_qs(parsed.query)
         name = (query.get("name") or [""])[0].strip()
         symbol = (query.get("symbol") or [""])[0].strip()
+        search = (query.get("q") or [""])[0].strip()
         if not name:
             raise ValueError("name is required")
-        return news_payload(name, symbol)
+        return news_payload(name, symbol, query=search or None)
     if parsed.path.startswith("/api/quote/"):
         raw = parsed.path.removeprefix("/api/quote/")
         market = (parse_qs(parsed.query).get("market") or ["HK"])[0].strip().upper() or "HK"

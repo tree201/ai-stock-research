@@ -16,12 +16,14 @@ from uuid import UUID
 from .service import (
     add_company_source,
     add_llm_model_payload,
+    add_llm_models_payload,
     add_trusted_host_payload,
     chat_entry_payload,
     chat_payload,
     configure_provider,
     create_project_with_session,
     create_session_for_project,
+    discover_llm_models_payload,
     history_payload,
     llm_config_payload,
     provider_status,
@@ -183,7 +185,7 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-        if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/projects", "/api/trusted-hosts", "/api/llm/providers", "/api/llm/models", "/api/llm/selection"} and not self.path.startswith(("/api/projects/", "/api/sessions/", "/api/company-panel", "/api/reports/", "/api/llm/providers/")):
+        if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/projects", "/api/trusted-hosts", "/api/llm/providers", "/api/llm/models", "/api/llm/models/discover", "/api/llm/models/batch", "/api/llm/selection"} and not self.path.startswith(("/api/projects/", "/api/sessions/", "/api/company-panel", "/api/reports/", "/api/llm/providers/")):
             self._send(404, b'{"error":"not found"}', "application/json")
             return
         try:
@@ -227,6 +229,10 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
                 response = save_llm_provider_payload(payload)
             elif self.path == "/api/llm/models":
                 response = add_llm_model_payload(payload)
+            elif self.path == "/api/llm/models/discover":
+                response = discover_llm_models_payload(payload)
+            elif self.path == "/api/llm/models/batch":
+                response = add_llm_models_payload(payload)
             elif self.path == "/api/llm/selection":
                 response = set_llm_selection_payload(payload)
             elif self.path == "/api/chat":

@@ -250,6 +250,30 @@ class OpenAICompatibleProvider:
         return AnalysisClaim(str(raw.get("category", "inference")), str(raw["text"]), evidence_ids, confidence, counter_ids)
 
 
+def list_remote_models(base_url: str, api_key: str, timeout: int = 10) -> list[str]:
+    """Fetch the model catalog from an OpenAI-compatible ``GET /models`` endpoint.
+
+    Mirrors deepseek-harness's discovery: normalize remote entries to model ids,
+    sorted; supports both ``{"data": [...]}`` and ``{"models": [...]}`` shapes.
+    """
+    url = f"{base_url.rstrip('/')}/models"
+    req = Request(url, headers={"Authorization": f"Bearer {api_key}"}, method="GET")
+    try:
+        with urlopen(req, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise LLMError(f"拉取模型列表失败: {exc}") from exc
+    entries: Any = None
+    if isinstance(body, dict):
+        entries = body.get("data")
+        if not isinstance(entries, list):
+            entries = body.get("models")
+    if not isinstance(entries, list):
+        raise LLMError("模型列表响应格式无法识别")
+    ids = {str(entry.get("id") or entry.get("name") or "").strip() for entry in entries if isinstance(entry, dict)}
+    return sorted(item for item in ids if item)
+
+
 class DeepSeekProvider(OpenAICompatibleProvider):
     """Convenience configuration for the DeepSeek API."""
 

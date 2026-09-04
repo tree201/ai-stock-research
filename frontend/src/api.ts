@@ -48,13 +48,15 @@ export const api = {
   llmConfig: () => request<LlmConfig>('/api/llm/config'),
   saveLlmProvider: (payload: { id?: number; name: string; base_url: string; api_key?: string }) => request<{ ok?: boolean; provider: LlmProvider; config: LlmConfig }>('/api/llm/providers', { method: 'POST', body: JSON.stringify(payload) }),
   removeLlmProvider: (id: number) => request<{ ok: boolean; config: LlmConfig }>(`/api/llm/providers/${id}`, { method: 'DELETE' }),
-  addLlmModel: (payload: { provider_id: number; model_id: string; display_name?: string; thinking_levels?: Record<string, Record<string, unknown>> }) => request<{ ok: boolean; config: LlmConfig }>('/api/llm/models', { method: 'POST', body: JSON.stringify(payload) }),
+  addLlmModel: (payload: { provider_id: number; model_id: string; display_name?: string; thinking_levels?: Record<string, Record<string, unknown>>; default_level?: string }) => request<{ ok: boolean; config: LlmConfig }>('/api/llm/models', { method: 'POST', body: JSON.stringify(payload) }),
+  addLlmModels: (payload: { provider_id: number; model_ids: string[] }) => request<{ ok: boolean; added: string[]; config: LlmConfig }>('/api/llm/models/batch', { method: 'POST', body: JSON.stringify(payload) }),
+  discoverLlmModels: (provider_id: number) => request<{ provider_id: number; models: { model_id: string; added: boolean }[] }>('/api/llm/models/discover', { method: 'POST', body: JSON.stringify({ provider_id }) }),
   removeLlmModel: (id: number) => request<{ ok: boolean; config: LlmConfig }>(`/api/llm/models/${id}`, { method: 'DELETE' }),
-  setLlmSelection: (payload: { model_row_id: number; level: string }) => request<{ ok: boolean; config: LlmConfig }>('/api/llm/selection', { method: 'POST', body: JSON.stringify(payload) }),
+  setLlmSelection: (payload: { model_row_id: number; level?: string }) => request<{ ok: boolean; config: LlmConfig }>('/api/llm/selection', { method: 'POST', body: JSON.stringify(payload) }),
 };
 
 export type LlmProvider = { id: number; name: string; base_url: string; has_api_key: boolean; builtin: number; enabled: number };
-export type LlmModel = { id: number; provider_id: number; model_id: string; display_name: string; thinking_levels: Record<string, Record<string, unknown>>; levels: string[] };
+export type LlmModel = { id: number; provider_id: number; model_id: string; display_name: string; thinking_levels: Record<string, Record<string, unknown>>; levels: string[]; default_level: string };
 export type LlmLevelOption = { value: string; label: string };
 export type LlmSelectionEntry = { model_row_id: number; provider_id: number; provider_name: string; model_id: string; display_name: string; level: string; has_api_key: boolean };
 export type LlmConfig = { providers: LlmProvider[]; models: LlmModel[]; levels: LlmLevelOption[]; selection: LlmSelectionEntry | null; recent: LlmSelectionEntry[] };

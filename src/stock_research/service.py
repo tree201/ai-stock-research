@@ -20,8 +20,8 @@ from .domain import ResearchProject, ResearchSession, SessionMessage, utc_now
 from .facts import FactCandidate
 from .pipeline import ResearchPipeline
 from .report import ReportBuilder, diff_reports
-from .llm import LLMError, ModelNotConfiguredError, OpenAICompatibleProvider, provider_from_config, provider_from_env
-from .llm_catalog import LEVEL_LABELS, THINKING_LEVELS, levels_for, normalize_level, params_for_level, parse_thinking_levels
+from .llm import LLMError, ModelNotConfiguredError, OpenAICompatibleProvider, list_remote_models, provider_from_config, provider_from_env
+from .llm_catalog import LEVEL_LABELS, THINKING_LEVELS, default_level_for, levels_for, normalize_level, params_for_level, parse_thinking_levels
 from .storage import SQLiteStore
 from .trust import DEFAULT_TRUSTED_HOSTS, classify_document, host_in_set
 from .workflow import ResearchWorkflow
@@ -879,30 +879,32 @@ def llm_config_payload() -> dict[str, Any]:
             "display_name": model.get("display_name") or model["model_id"],
             "thinking_levels": parse_thinking_levels(model.get("thinking_levels")),
             "levels": levels_for(model.get("thinking_levels")),
+            "default_level": default_level_for(model.get("thinking_levels"), model.get("default_level")),
         }
         for model in models
     ]
     by_row = {model["id"]: model for model in models_out}
 
-    def _entry(model_row_id: Any, level: Any = "off") -> dict[str, Any] | None:
+    def _entry(model_row_id: Any, level: Any = None) -> dict[str, Any] | None:
         model = by_row.get(int(model_row_id)) if model_row_id is not None else None
         if not model:
             return None
         provider = next((p for p in providers_out if p["id"] == model["provider_id"]), None)
         if not provider:
             return None
+        resolved = level if level else model["default_level"]
         return {
             "model_row_id": model["id"],
             "provider_id": provider["id"],
             "provider_name": provider["name"],
             "model_id": model["model_id"],
             "display_name": model["display_name"],
-            "level": normalize_level(level),
+            "level": normalize_level(resolved),
             "has_api_key": provider["has_api_key"],
         }
 
     current = _entry(selection.get("model_row_id"), selection.get("level")) if selection else None
-    recent = [entry for entry in (_entry(row_id, "off") for row_id in recent_ids) if entry]
+    recent = [entry for entry in (_entry(row_id) for row_id in recent_ids) if entry]
     return {
         "providers": providers_out,
         "models": models_out,
@@ -955,10 +957,63 @@ def add_llm_model_payload(payload: dict[str, Any]) -> dict[str, Any]:
             str(payload.get("model_id", "")),
             str(payload.get("display_name") or "") or None,
             payload.get("thinking_levels"),
+            payload.get("default_level"),
         )
         return {"ok": True, "config": llm_config_payload()}
     finally:
         store.close()
+
+
+def add_llm_models_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """批量添加模型（模型发现后勾选导入）；已存在的跳过。"""
+    provider_id = int(payload.get("provider_id"))
+    model_ids = payload.get("model_ids")
+    if not isinstance(model_ids, list) or not model_ids:
+        raise ValueError("model_ids 不能为空")
+    store = SQLiteStore(database_path())
+    try:
+        added: list[str] = []
+        for raw in model_ids:
+            model_id = str(raw or "").strip()
+            if not model_id:
+                continue
+            try:
+                store.add_llm_model(provider_id, model_id)
+                added.append(model_id)
+            except ValueError:
+                # 已存在：add_llm_model 的 INSERT OR IGNORE 已开启隐式事务但未提交，
+                # 必须回滚释放写锁，否则后续 llm_config_payload 的新连接会被锁死。
+                store.connection.rollback()
+                continue
+        return {"ok": True, "added": added, "config": llm_config_payload()}
+    finally:
+        store.close()
+
+
+def discover_llm_models_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """调供应商的 /models 接口发现可用模型（参考 deepseek-harness discovery）。
+
+    返回远端模型列表并标记哪些已在目录中；未配置密钥时要求先配置。
+    """
+    provider_id = int(payload.get("provider_id"))
+    store = SQLiteStore(database_path())
+    try:
+        provider = store.get_llm_provider(provider_id)
+        if not provider:
+            raise KeyError("供应商不存在")
+        if not provider.get("api_key"):
+            raise ValueError("请先配置该供应商的 API Key 再拉取模型列表")
+        base_url = str(provider.get("base_url") or "").strip()
+        if not base_url:
+            raise ValueError("请先配置该供应商的接口地址")
+        remote = list_remote_models(base_url, provider["api_key"])
+        existing = {model["model_id"] for model in store.list_llm_models(provider_id)}
+    finally:
+        store.close()
+    return {
+        "provider_id": provider_id,
+        "models": [{"model_id": model_id, "added": model_id in existing} for model_id in remote],
+    }
 
 
 def remove_llm_model_payload(model_row_id: str) -> dict[str, Any]:
@@ -971,14 +1026,15 @@ def remove_llm_model_payload(model_row_id: str) -> dict[str, Any]:
 
 
 def set_llm_selection_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    """切换当前模型与强度档位；同时维护最近使用（去重，最多 8 条）。"""
+    """切换当前模型与强度档位；未指定档位时用模型默认档（deepseek-harness defaultEffort 语义）。"""
     model_row_id = int(payload.get("model_row_id"))
-    level = normalize_level(payload.get("level"))
     store = SQLiteStore(database_path())
     try:
         model = store.get_llm_model(model_row_id)
         if not model:
             raise KeyError("模型不存在")
+        raw_level = str(payload.get("level") or "").strip()
+        level = normalize_level(raw_level) if raw_level else default_level_for(model.get("thinking_levels"), model.get("default_level"))
         selection = {"model_row_id": model_row_id, "provider_id": model["provider_id"], "model_id": model["model_id"], "level": level}
         store.set_setting("llm.selection", selection)
         recent = store.get_setting("llm.recent")

@@ -7,6 +7,7 @@ from unittest import mock
 from stock_research.llm import OpenAICompatibleProvider
 from stock_research.llm_catalog import (
     THINKING_LEVELS,
+    default_level_for,
     levels_for,
     normalize_level,
     params_for_level,
@@ -21,6 +22,17 @@ class LlmCatalogTests(unittest.TestCase):
         self.assertEqual(normalize_level(""), "off")
         self.assertEqual(normalize_level(None), "off")
         self.assertEqual(normalize_level("extreme"), "off")
+
+    def test_default_level_for_follows_harness_default_effort(self) -> None:
+        # 无档位（固定模型）默认 off
+        self.assertEqual(default_level_for({}), "off")
+        # 支持档位的模型默认 high（deepseek-harness: "default balance for most tasks"）
+        levels = {"off": {"thinking": {"type": "disabled"}}, "high": {"thinking": {"type": "enabled"}}}
+        self.assertEqual(default_level_for(levels), "high")
+        # 显式声明优先，且必须落在支持档位内
+        self.assertEqual(default_level_for(levels, "low"), "high")
+        toggle = {"off": {"enable_thinking": False}, "low": {"enable_thinking": True}, "medium": {"enable_thinking": True}, "high": {"enable_thinking": True}}
+        self.assertEqual(default_level_for(toggle, "medium"), "medium")
 
     def test_parse_thinking_levels_drops_invalid_entries(self) -> None:
         parsed = parse_thinking_levels({"off": {"enable_thinking": False}, "bogus": {"x": 1}, "low": "oops"})
@@ -162,6 +174,86 @@ class LlmSelectionServiceTests(unittest.TestCase):
         self.assertEqual(payload["selection"]["model_row_id"], models[1]["id"])
         self.assertEqual(payload["selection"]["level"], "off")
         self.assertEqual([e["model_row_id"] for e in payload["recent"]], [models[1]["id"], models[0]["id"]])
+
+    def test_selection_without_level_uses_model_default(self) -> None:
+        from stock_research import service
+
+        toggle = next(p for p in self.store.list_llm_providers() if "智谱" in p["name"])
+        model = next(m for m in self.store.list_llm_models(toggle["id"]) if m["model_id"] == "glm-4.6")
+        result = service.set_llm_selection_payload({"model_row_id": model["id"]})
+        self.assertEqual(result["config"]["selection"]["level"], "high")
+
+        fixed = next(p for p in self.store.list_llm_providers() if p["name"] == "DeepSeek")
+        fixed_model = next(m for m in self.store.list_llm_models(fixed["id"]) if m["model_id"] == "deepseek-chat")
+        result = service.set_llm_selection_payload({"model_row_id": fixed_model["id"]})
+        self.assertEqual(result["config"]["selection"]["level"], "off")
+
+    def test_config_payload_exposes_default_levels(self) -> None:
+        from stock_research import service
+
+        payload = service.llm_config_payload()
+        glm = next(m for m in payload["models"] if m["model_id"] == "glm-4.6")
+        self.assertEqual(glm["default_level"], "high")
+        chat = next(m for m in payload["models"] if m["model_id"] == "deepseek-chat")
+        self.assertEqual(chat["default_level"], "off")
+
+
+class LlmDiscoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._dir = TemporaryDirectory()
+        self.db_path = f"{self._dir.name}/research.sqlite3"
+        self._env_patch = mock.patch.dict(os.environ, {"AI_STOCK_DB": self.db_path}, clear=False)
+        self._env_patch.start()
+        self.store = SQLiteStore(self.db_path)
+
+    def tearDown(self) -> None:
+        self.store.close()
+        self._env_patch.stop()
+        self._dir.cleanup()
+
+    def test_discover_requires_api_key(self) -> None:
+        from stock_research import service
+
+        provider = self.store.list_llm_providers()[0]
+        with self.assertRaises(ValueError):
+            service.discover_llm_models_payload({"provider_id": provider["id"]})
+
+    def test_discover_lists_remote_models_and_batch_add(self) -> None:
+        from stock_research import service
+
+        provider = next(p for p in self.store.list_llm_providers() if p["name"] == "DeepSeek")
+        self.store.update_llm_provider(provider["id"], api_key="sk-x")
+        remote = ["deepseek-chat", "deepseek-new-model", "deepseek-v3.2"]
+        with mock.patch.object(service, "list_remote_models", return_value=remote) as mocked:
+            payload = service.discover_llm_models_payload({"provider_id": provider["id"]})
+        mocked.assert_called_once()
+        items = {item["model_id"]: item["added"] for item in payload["models"]}
+        self.assertTrue(items["deepseek-chat"])  # 目录里已有
+        self.assertFalse(items["deepseek-v3.2"])
+
+        result = service.add_llm_models_payload({"provider_id": provider["id"], "model_ids": ["deepseek-v3.2", "deepseek-chat", ""]})
+        self.assertEqual(result["added"], ["deepseek-v3.2"])
+        stored = {m["model_id"] for m in self.store.list_llm_models(provider["id"])}
+        self.assertIn("deepseek-v3.2", stored)
+
+    def test_list_remote_models_parses_openai_shapes(self) -> None:
+        from stock_research import llm as llm_module
+
+        class FakeResponse:
+            def __enter__(self):  # noqa: ANN204
+                return self
+
+            def __exit__(self, *args) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps({"data": [{"id": "m-b"}, {"id": "m-a"}, "bogus"]}).encode("utf-8")
+
+        with mock.patch.object(llm_module, "urlopen", return_value=FakeResponse()):
+            self.assertEqual(llm_module.list_remote_models("https://api.example.com/v1", "sk"), ["m-a", "m-b"])
+        with mock.patch.object(llm_module, "urlopen", side_effect=RuntimeError("boom")):
+            with self.assertRaises(llm_module.LLMError):
+                llm_module.list_remote_models("https://api.example.com/v1", "sk")
 
 
 class LlmExtraParamsRequestTests(unittest.TestCase):

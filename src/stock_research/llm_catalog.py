@@ -117,6 +117,21 @@ def levels_for(thinking_levels: Any) -> list[str]:
     return [level for level in THINKING_LEVELS if level in parsed]
 
 
+def default_level_for(thinking_levels: Any, default_level: Any = None) -> str:
+    """Pick a model's default level (参考 deepseek-harness defaultEffort).
+
+    显式声明的默认档位优先；未声明时支持档位的模型默认 ``high``
+    （"The default balance for most tasks"），固定模型为 ``off``。
+    """
+    levels = levels_for(thinking_levels)
+    if not levels:
+        return "off"
+    raw = str(default_level or "").strip().casefold()
+    if raw in levels:
+        return raw
+    return "high" if "high" in levels else levels[0]
+
+
 def params_for_level(thinking_levels: Any, level: Any) -> dict[str, Any]:
     """Resolve the request-parameter fragment for a level (空档位返回 {})."""
     parsed = parse_thinking_levels(thinking_levels)

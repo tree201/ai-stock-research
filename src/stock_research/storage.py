@@ -161,6 +161,7 @@ class SQLiteStore:
                 model_id TEXT NOT NULL,
                 display_name TEXT,
                 thinking_levels TEXT,
+                default_level TEXT,
                 enabled INTEGER NOT NULL DEFAULT 1,
                 UNIQUE(provider_id, model_id)
             );
@@ -181,6 +182,9 @@ class SQLiteStore:
         source_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(company_sources)").fetchall()}
         if "source_class" not in source_columns:
             self.connection.execute("ALTER TABLE company_sources ADD COLUMN source_class TEXT DEFAULT 'private'")
+        model_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(llm_models)").fetchall()}
+        if "default_level" not in model_columns:
+            self.connection.execute("ALTER TABLE llm_models ADD COLUMN default_level TEXT")
         self._backfill_document_trust()
         self._seed_trusted_hosts()
         self._seed_llm_catalog()
@@ -238,8 +242,8 @@ class SQLiteStore:
                 if f"{provider['name']}:{model['model_id']}" in tombstones:
                     continue
                 self.connection.execute(
-                    "INSERT OR IGNORE INTO llm_models (provider_id,model_id,display_name,thinking_levels,enabled) VALUES (?,?,?,?,1)",
-                    (provider_id, model["model_id"], model["display_name"], _json(parse_thinking_levels(model["thinking_levels"]))),
+                    "INSERT OR IGNORE INTO llm_models (provider_id,model_id,display_name,thinking_levels,default_level,enabled) VALUES (?,?,?,?,?,1)",
+                    (provider_id, model["model_id"], model["display_name"], _json(parse_thinking_levels(model["thinking_levels"])), model.get("default_level")),
                 )
 
     # --- LLM provider/model hub -------------------------------------------------
@@ -311,7 +315,7 @@ class SQLiteStore:
         row = self.connection.execute("SELECT * FROM llm_models WHERE id=?", (model_row_id,)).fetchone()
         return dict(row) if row else None
 
-    def add_llm_model(self, provider_id: int, model_id: str, display_name: str | None = None, thinking_levels: Any = None) -> dict[str, Any]:
+    def add_llm_model(self, provider_id: int, model_id: str, display_name: str | None = None, thinking_levels: Any = None, default_level: Any = None) -> dict[str, Any]:
         from .llm_catalog import parse_thinking_levels
 
         model_id = model_id.strip()
@@ -320,9 +324,10 @@ class SQLiteStore:
         if not self.get_llm_provider(provider_id):
             raise KeyError("供应商不存在")
         levels = parse_thinking_levels(thinking_levels)
+        stored_default = str(default_level or "").strip().casefold() or None
         cursor = self.connection.execute(
-            "INSERT OR IGNORE INTO llm_models (provider_id,model_id,display_name,thinking_levels,enabled) VALUES (?,?,?,?,1)",
-            (provider_id, model_id, (display_name or "").strip() or None, _json(levels)),
+            "INSERT OR IGNORE INTO llm_models (provider_id,model_id,display_name,thinking_levels,default_level,enabled) VALUES (?,?,?,?,?,1)",
+            (provider_id, model_id, (display_name or "").strip() or None, _json(levels), stored_default),
         )
         if not cursor.rowcount:
             raise ValueError("该供应商下已存在同名模型")

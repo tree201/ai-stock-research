@@ -9,7 +9,7 @@ from uuid import UUID
 from stock_research.documents import FetchedDocument
 from stock_research.llm import HeuristicLLMProvider, ModelNotConfiguredError
 from stock_research.market_data import PriceBar
-from stock_research.service import add_company_source, chat_entry_payload, chat_payload, history_payload, provider_status, recalculate_report, remove_company_source, research_documents, resolve_provider, run_research_payload, run_update_payload
+from stock_research.service import add_company_source, chat_entry_payload, chat_payload, history_payload, provider_status, recalculate_report, remove_company, remove_company_source, research_documents, resolve_provider, run_research_payload, run_update_payload
 from stock_research.jobs import InlineQueue, create_and_enqueue, execute_research_job
 from stock_research.storage import SQLiteStore
 from stock_research.web_search import SearchResult
@@ -430,6 +430,44 @@ class WebMvpTests(unittest.TestCase):
             companies = history_payload("/api/companies")
             self.assertEqual(len(companies), 1)
             self.assertEqual(companies[0]["session_count"], 1)
+
+    def test_remove_company_deletes_all_research_data(self) -> None:
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
+            clear=False,
+        ):
+            db_path = f"{directory}/research.sqlite3"
+            report = run_research_payload({
+                "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
+                "document": "Revenue FY2024 HK$ 100 million\nRisk: competition",
+            }, db_path=db_path)
+            add_company_source("00700", "HK", "https://ir.example.com/results.html")
+
+            store = SQLiteStore(db_path)
+            company_id = store.load_project(store.find_project("00700").id).company_id
+            self.assertGreaterEqual(len(store.list_project_reports(store.find_project("00700").id)), 1)
+            store.close()
+
+            result = remove_company("00700", "HK", db_path=db_path)
+            self.assertTrue(result["ok"])
+            self.assertGreaterEqual(result["deleted"].get("reports", 0), 1)
+            self.assertGreaterEqual(result["deleted"].get("projects", 1), 1)
+
+            reopened = SQLiteStore(db_path)
+            try:
+                self.assertEqual(reopened.find_project("00700"), None)
+                for table in ("projects", "runs", "reports", "documents", "evidence_chunks", "sessions", "session_messages", "jobs", "company_sources"):
+                    count = reopened.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                    self.assertEqual(count, 0, f"{table} should be empty after company removal")
+                self.assertEqual(reopened.list_company_source_urls(company_id), [])
+            finally:
+                reopened.close()
+
+            self.assertEqual([c for c in history_payload("/api/companies") if c["symbol"] == "00700"], [])
+
+            with self.assertRaisesRegex(ValueError, "company not found"):
+                remove_company("00700", "HK", db_path=db_path)
 
     def test_company_panel_returns_project_documents_and_reports(self) -> None:
         with TemporaryDirectory() as directory, patch.dict(

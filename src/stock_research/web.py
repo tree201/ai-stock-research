@@ -23,6 +23,7 @@ from .service import (
     create_session_for_project,
     history_payload,
     provider_status,
+    remove_company,
     remove_company_source,
     remove_trusted_host_payload,
     run_research_payload,

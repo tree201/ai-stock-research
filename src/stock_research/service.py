@@ -768,6 +768,21 @@ def remove_company_source(source_id: str) -> None:
         store.close()
 
 
+def remove_company(symbol: str, market: str, db_path: str | Path | None = None) -> dict[str, Any]:
+    """Delete a company and all of its research data permanently."""
+    symbol = symbol.strip()
+    market = (market or "HK").strip().upper() or "HK"
+    store = SQLiteStore(db_path or database_path())
+    try:
+        project = store.find_project(symbol, market)
+        if project is None:
+            raise ValueError("company not found")
+        counts = store.delete_company(project.company_id)
+        return {"ok": True, "symbol": symbol, "market": market, "deleted": counts}
+    finally:
+        store.close()
+
+
 def trusted_hosts_payload() -> dict[str, Any]:
     store = SQLiteStore(database_path())
     try:

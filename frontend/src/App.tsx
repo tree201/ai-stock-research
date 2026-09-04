@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Button, Badge, Modal, Select, Tabs } from "antd";
+import { Button, Badge, Dropdown, Modal, Select, Tabs } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -18,6 +18,7 @@ import {
   FileText,
   ListTodo,
   MessageSquare,
+  MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
@@ -450,6 +451,7 @@ type CompanyTreeProps = {
     companyName: string,
     companyKey: string,
   ) => void;
+  onRemoveCompany: (company: Company) => void;
 };
 
 function CompanyTree({
@@ -462,6 +464,7 @@ function CompanyTree({
   onToggle,
   onOpenCompany,
   onOpenSession,
+  onRemoveCompany,
 }: CompanyTreeProps) {
   return (
     <div className="company-list">
@@ -493,6 +496,28 @@ function CompanyTree({
                   <span className="company-symbol">{company.symbol}</span>
                   <span className="company-market">{company.market}</span>
                   <em>{company.session_count}</em>
+                  <Dropdown
+                    trigger={["click"]}
+                    menu={{
+                      items: [
+                        {
+                          key: "remove",
+                          label: "移除该公司",
+                          danger: true,
+                          onClick: () => onRemoveCompany(company),
+                        },
+                      ],
+                    }}
+                  >
+                    <button
+                      className="company-more"
+                      title="更多选项"
+                      aria-label={`更多选项：${company.name}`}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <MoreHorizontal size={13} />
+                    </button>
+                  </Dropdown>
                 </span>
               </button>
             </div>
@@ -987,6 +1012,39 @@ export default function App() {
     }
   }
 
+  async function removeCompanyConfirmed(company: Company) {
+    Modal.confirm({
+      title: `移除「${company.name}」？`,
+      content:
+        "将永久删除该公司的全部会话、研究报告和资料，操作不可恢复。",
+      okText: "移除",
+      okType: "danger",
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          await api.removeCompany(company.symbol, company.market);
+          const key = `${company.market}:${company.symbol}`;
+          if (selectedCompanyKey === key) {
+            setSessionId(null);
+            setMessages([]);
+            setCompanyName("");
+            setSelectedCompanyKey(null);
+            setPendingJob(null);
+            setProgressRun(undefined);
+            setPanelOpen(false);
+            setPanelCompany(null);
+            setPanelData(null);
+            setPanelQuote(null);
+          }
+          setCompanySessions((prev) => ({ ...prev, [key]: [] }));
+          await refreshCompanies();
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "移除失败");
+        }
+      },
+    });
+  }
+
   async function openSession(
     session: Session,
     companyNameValue: string,
@@ -1223,6 +1281,7 @@ export default function App() {
                 onOpenSession={(session, name, key) =>
                   void openSession(session, name, key)
                 }
+                onRemoveCompany={(company) => removeCompanyConfirmed(company)}
               />
             </div>
           </>

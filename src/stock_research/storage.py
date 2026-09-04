@@ -702,6 +702,71 @@ class SQLiteStore:
         ).fetchall()
         return [row["url"] for row in rows]
 
+    def delete_company(self, company_id: UUID) -> dict[str, int]:
+        """Delete everything belonging to one company, children first.
+
+        Removal is total: projects, sessions and their messages/events, runs
+        with steps/events/facts/calculations/claims/reports, documents with
+        their evidence chunks, registered sources, jobs and tag links.
+        """
+        connection = self.connection
+        run_ids = [row["id"] for row in connection.execute(
+            "SELECT id FROM runs WHERE project_id IN (SELECT id FROM projects WHERE company_id=?)",
+            (str(company_id),),
+        ).fetchall()]
+        session_ids = [row["id"] for row in connection.execute(
+            "SELECT id FROM sessions WHERE project_id IN (SELECT id FROM projects WHERE company_id=?)",
+            (str(company_id),),
+        ).fetchall()]
+        document_ids = [row["id"] for row in connection.execute(
+            "SELECT id FROM documents WHERE company_id=?",
+            (str(company_id),),
+        ).fetchall()]
+        counts: dict[str, int] = {}
+
+        def execute_many(table: str, sql: str, ids: list[str]) -> None:
+            if not ids:
+                return
+            marks = ",".join("?" for _ in ids)
+            counts[table] = connection.execute(sql.format(marks=marks), ids).rowcount
+
+        execute_many("reports", "DELETE FROM reports WHERE run_id IN ({marks})", run_ids)
+        execute_many("calculations", "DELETE FROM calculations WHERE run_id IN ({marks})", run_ids)
+        execute_many("claims", "DELETE FROM claims WHERE run_id IN ({marks})", run_ids)
+        execute_many("facts", "DELETE FROM facts WHERE run_id IN ({marks})", run_ids)
+        execute_many("run_events", "DELETE FROM run_events WHERE run_id IN ({marks})", run_ids)
+        execute_many("steps", "DELETE FROM steps WHERE run_id IN ({marks})", run_ids)
+        execute_many("run_documents", "DELETE FROM run_documents WHERE run_id IN ({marks})", run_ids)
+        execute_many("runs", "DELETE FROM runs WHERE id IN ({marks})", run_ids)
+        execute_many("evidence_chunks", "DELETE FROM evidence_chunks WHERE document_id IN ({marks})", document_ids)
+        execute_many("documents", "DELETE FROM documents WHERE id IN ({marks})", document_ids)
+        execute_many("jobs", "DELETE FROM jobs WHERE session_id IN ({marks})", session_ids)
+        execute_many("session_messages", "DELETE FROM session_messages WHERE session_id IN ({marks})", session_ids)
+        execute_many("session_events", "DELETE FROM session_events WHERE session_id IN ({marks})", session_ids)
+        execute_many("sessions", "DELETE FROM sessions WHERE id IN ({marks})", session_ids)
+        connection.execute(
+            "DELETE FROM run_documents WHERE run_id NOT IN (SELECT id FROM runs)"
+        )
+        connection.execute(
+            "DELETE FROM company_sources WHERE company_id=?", (str(company_id),)
+        )
+        connection.execute(
+            """DELETE FROM tags WHERE id IN (
+                 SELECT tag_id FROM project_tags
+                 WHERE project_id IN (SELECT id FROM projects WHERE company_id=?)
+               ) AND id NOT IN (SELECT tag_id FROM project_tags WHERE project_id NOT IN (SELECT id FROM projects WHERE company_id=?))""",
+            (str(company_id), str(company_id)),
+        )
+        connection.execute(
+            "DELETE FROM project_tags WHERE project_id IN (SELECT id FROM projects WHERE company_id=?)",
+            (str(company_id),),
+        )
+        counts["projects"] = connection.execute(
+            "DELETE FROM projects WHERE company_id=?", (str(company_id),)
+        ).rowcount
+        self.connection.commit()
+        return counts
+
     def list_project_reports(self, project_id: UUID) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             """SELECT r.id, r.run_id, r.version, r.created_at, ru.status AS run_status, ru.question

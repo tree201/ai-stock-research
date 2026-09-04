@@ -22,6 +22,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   companies: () => request<Company[]>("/api/companies"),
   companyCatalog: () => request<CompanyCatalogEntry[]>("/api/company-catalog"),
+  removeCompany: (symbol: string, market: string) => request<{ ok: boolean; deleted: Record<string, number> }>(`/api/companies/${encodeURIComponent(symbol)}?market=${encodeURIComponent(market)}`, { method: "DELETE" }),
   search: (query: string) => request<SearchResult[]>(`/api/search?q=${encodeURIComponent(query)}`),
   sessions: (projectId: string) => request<Session[]>(`/api/projects/${projectId}/sessions`),
   createProject: (name: string, symbol: string, market = "HK") => request<{ project: { id: string; name: string; symbol: string; market: string }; session: Session }>("/api/projects", { method: "POST", body: JSON.stringify({ name, symbol, market }) }),

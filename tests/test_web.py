@@ -528,7 +528,7 @@ class WebMvpTests(unittest.TestCase):
             news = history_payload("/api/news?name=长江和记&symbol=00001")
         self.assertEqual([item["url"] for item in news], ["https://example.com/a", "https://example.com/b"])
 
-    def test_news_search_scopes_to_company_with_raw_fallback(self) -> None:
+    def test_news_search_stays_scoped_to_company(self) -> None:
         class FakeNews:
             def __init__(self):
                 self.queries: list[str] = []
@@ -537,32 +537,30 @@ class WebMvpTests(unittest.TestCase):
                 self.queries.append(query)
                 if query == "长江和记 巴拿马":
                     return [SearchResult(title="scoped", url="https://example.com/scoped", snippet="s")]
-                if query == "巴拿马":
-                    return [SearchResult(title="raw", url="https://example.com/raw", snippet="s")]
                 return []
 
         fake = FakeNews()
         with patch("stock_research.service.GoogleNewsSearch", return_value=fake):
             news = history_payload("/api/news?name=长江和记&symbol=00001&q=%E5%B7%B4%E6%8B%BF%E9%A9%AC")
-        self.assertEqual(fake.queries[0], "长江和记 巴拿马")
+        # Exactly one company-scoped query — no raw-keyword fallback.
+        self.assertEqual(fake.queries, ["长江和记 巴拿马"])
         self.assertEqual(news[0]["url"], "https://example.com/scoped")
 
-    def test_news_search_falls_back_to_raw_query(self) -> None:
+    def test_news_search_without_company_hits_returns_empty(self) -> None:
         class FakeNews:
             def __init__(self):
                 self.queries: list[str] = []
 
             def search(self, query, max_results=5):
                 self.queries.append(query)
-                if query == "巴拿马":
-                    return [SearchResult(title="raw", url="https://example.com/raw", snippet="s")]
-                return []
+                return []  # nothing matches even with the company name
 
         fake = FakeNews()
         with patch("stock_research.service.GoogleNewsSearch", return_value=fake):
-            news = history_payload("/api/news?name=长江和记&symbol=00001&q=%E5%B7%B4%E6%8B%BF%E9%A9%AC")
-        self.assertEqual(fake.queries, ["长江和记 巴拿马", "巴拿马"])
-        self.assertEqual(news[0]["url"], "https://example.com/raw")
+            news = history_payload("/api/news?name=长江和记&symbol=00001&q=%E6%9D%8E%E5%AE%B6")
+        # Raw "李家" must never be searched on its own.
+        self.assertEqual(fake.queries, ["长江和记 李家"])
+        self.assertEqual(news, [])
 
     def test_article_endpoint_extracts_readable_text(self) -> None:
         class FakeResponse:

@@ -1623,7 +1623,7 @@ export default function App() {
                         <Search size={13} />
                         <input
                           value={newsQuery}
-                          placeholder="搜索相关新闻，回车确认…"
+                          placeholder="在本公司新闻中搜索，回车确认…"
                           onChange={(e) => setNewsQuery(e.target.value)}
                           onKeyDown={(e) => {
                             if (e.key === "Enter") void submitNewsSearch();

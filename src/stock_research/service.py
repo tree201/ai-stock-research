@@ -605,8 +605,10 @@ def news_payload(name: str, symbol: str, query: str | None = None) -> list[dict[
 
     Without a query, ``"{name} 最新"`` and ``{name}`` are merged and deduped
     by URL for broader coverage (capped at ``DEFAULT_NEWS_LIMIT``); the bare
-    symbol is a last-resort fallback.  With a query, the company-scoped
-    search ``"{name} {query}"`` wins and the raw query is the fallback.
+    symbol is a last-resort fallback.  With a query the search stays scoped
+    to this company (``"{name} {query}"``) — no raw-keyword fallback, because
+    unscoped results are noise inside a company panel.  An empty result means
+    "nothing found for this company", not an invitation to search the web.
     """
     store = SQLiteStore(database_path())
     try:
@@ -616,11 +618,7 @@ def news_payload(name: str, symbol: str, query: str | None = None) -> list[dict[
     google = GoogleNewsSearch()
     trimmed = (query or "").strip()
     if trimmed:
-        for candidate in (f"{name} {trimmed}", trimmed):
-            results = google.search(candidate, max_results=40)
-            if results:
-                return [_news_item(item, trusted_hosts) for item in results]
-        return []
+        return [_news_item(item, trusted_hosts) for item in google.search(f"{name} {trimmed}", max_results=40)]
     collected: list[Any] = []
     seen: set[str] = set()
     for candidate in (f"{name} 最新", name):

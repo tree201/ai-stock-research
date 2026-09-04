@@ -1,0 +1,676 @@
+/* Models settings section, in the harness settings-panel design language:
+ * 14/22 body, 12/18 caption, capsule controls (h36 r18; h28 r14 where a row is
+ * dense), 32px fields, and hairline borders — 1:1 抄自 deepseek-harness
+ * ui-settings-models/ModelsSection.module.css。
+ *
+ * Every color resolves through this project's theme tokens (theme.ts is the
+ * single token source); the harness `--dsw-alias-*` mapping is:
+ *   label-primary  → --ink          label-secondary → --ink-soft
+ *   label-tertiary → --ink-muted    border-l2       → --line
+ *   border-l3      → --rail-border  module-platform → --surface-soft
+ *   layer-1        → --surface      interactive-bg  → --rail-hover
+ *   primary-fill   → --signal       state-error     → --danger
+ *   state-success  → --signal       state-warn      → --tag-warn-ink
+ */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 720px;
+  color: var(--ink);
+}
+
+.title {
+  margin: 0;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.intro {
+  margin: 0;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--ink-muted);
+}
+
+.notice {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--tag-warn-ink);
+}
+
+.savedNotice {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--signal);
+}
+
+.rows {
+  list-style: none;
+  /* Extra air between the title/intro block and the first provider card. */
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* A configured provider: outlined on the panel fill, so the filled editor
+   card it expands into reads as the nested object. */
+.rowCard {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rowHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.rowIdentity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.rowName {
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+/* Reads as an annotation on the name, not as a second name: caption size and
+   the secondary label tone, so it never competes with the row's own title. */
+.rowTag {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--rail-border);
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ink-soft);
+}
+
+/* The endpoint under the name: tertiary, truncated, never competing. */
+.rowRoute {
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--ink-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.credentialDot {
+  box-sizing: border-box;
+  display: inline-block;
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.credentialDotConfigured {
+  background: var(--signal);
+}
+
+.credentialDotMissing {
+  background: var(--danger);
+}
+
+.rowActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+/* `box-sizing` on every control here: without it the outlined variants stand
+   2px taller than the filled ones they sit beside (Cancel next to Apply, Edit
+   next to Delete). */
+.primaryButton,
+.secondaryButton,
+.addButton {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  height: 36px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 18px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.primaryButton {
+  background: var(--signal);
+  color: #ffffff;
+}
+
+.primaryButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--signal) 86%, #000);
+}
+
+.secondaryButton,
+.addButton {
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+}
+
+.secondaryButton:hover:not(:disabled),
+.addButton:hover:not(:disabled) {
+  background: var(--rail-hover);
+}
+
+.dangerButton {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  padding: 0 14px;
+  border: none;
+  border-radius: 18px;
+  background: transparent;
+  color: var(--danger);
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.dangerButton:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+/* Provider-row controls take the dense capsule (Button `.sm`). */
+.rowActions .secondaryButton,
+.rowActions .dangerButton {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 14px;
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled,
+.dangerButton:disabled,
+.addButton:disabled,
+.linkButton:disabled,
+.addModelButton:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.primaryButton:focus-visible,
+.secondaryButton:focus-visible,
+.dangerButton:focus-visible,
+.addButton:focus-visible,
+.linkButton:focus-visible,
+.addModelButton:focus-visible,
+.iconButton:focus-visible,
+.customizedSummary:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--rail-border);
+}
+
+/* Editing surface: a filled module on the panel, matching the settings
+   selector fill rather than adding another outline inside the row. */
+.editor {
+  border-radius: 12px;
+  background: var(--surface-soft);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.editorHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.editorTitle {
+  font-size: 14px;
+  line-height: 22px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.editorRoute {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ink-muted);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fieldLabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--ink-soft);
+}
+
+.linkButton {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.linkButton:hover:not(:disabled) {
+  background: var(--rail-hover);
+  color: var(--ink-soft);
+}
+
+.advancedHint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ink-muted);
+}
+
+.editorActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.addBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* The way to gain a provider the presets do not ship. Wraps rather than
+   shrinking below a legible label. */
+.addActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.addButton {
+  /* Overrides the shared button base above: this is not a pill sitting in
+     a footer but the last slot of the provider list, so it splits the row
+     evenly and repeats the row cards' corner. Dashed, like every other
+     "nothing here yet" affordance on this page, to read as a place rather
+     than a command. */
+  flex: 1 1 0;
+  min-width: 180px;
+  gap: 6px;
+  height: 44px;
+  border: 1px dashed var(--rail-border);
+  border-radius: 12px;
+}
+
+.addCard,
+.setupCard {
+  border-radius: 12px;
+  background: var(--surface-soft);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  list-style: none;
+}
+
+/* Nested in a card that already carries the module chrome. */
+.addCard .editor,
+.setupCard .editor {
+  background: none;
+  padding: 0;
+}
+
+.customized {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+/* Native disclosure marker replaced by a rotating chevron: the built-in
+   triangle differs per engine and cannot take the label color. */
+.customizedSummary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 2px 4px;
+  margin-left: -4px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--ink-soft);
+  list-style: none;
+}
+
+.customizedSummary::-webkit-details-marker {
+  display: none;
+}
+
+.customizedSummary::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid currentcolor;
+  border-bottom: 1.5px solid currentcolor;
+  transform: rotate(-45deg) translate(-1px, -1px);
+  transition: transform 120ms ease;
+}
+
+.customized[open] > .customizedSummary::before {
+  transform: rotate(45deg) translate(-1px, -1px);
+}
+
+.customizedSummary:hover {
+  color: var(--ink);
+}
+
+.customizedBody {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 12px;
+}
+
+/* Model catalog: a table, not a stack of cards. */
+.modelCatalog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.modelCatalogHeading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.modelCatalogTitle {
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  color: var(--ink-soft);
+}
+
+.modelCatalogMeta,
+.modelEmpty {
+  margin: 0;
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* Model list: one bordered entry per model, id and display name on the row,
+   capacities behind the row's own disclosure. */
+.modelList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.modelListHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.modelEntry {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px;
+}
+
+.modelRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Square, label-free affordances: the row's own inputs carry the meaning, so
+   the actions stay glyphs and announce themselves through aria-label. */
+.iconButton {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+}
+
+.iconButton:hover:not(:disabled) {
+  background: var(--rail-hover);
+  color: var(--ink);
+}
+
+.iconButton:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+/* The delete glyph keeps the danger tint the rest of the section uses. */
+.iconButtonDanger:hover:not(:disabled) {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.modelAdvanced {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px;
+  padding: 8px 4px 2px;
+}
+
+.modelField {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.modelFieldLabel {
+  color: var(--ink-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.modelEmpty {
+  padding: 12px;
+  border: 1px dashed var(--rail-border);
+  border-radius: 8px;
+  text-align: center;
+}
+
+.addModelButton {
+  box-sizing: border-box;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.addModelButton:hover:not(:disabled) {
+  background: var(--rail-hover);
+}
+
+.input {
+  box-sizing: border-box;
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  background: var(--surface);
+  color: var(--ink);
+}
+
+/* Enum pickers hold a handful of short options; a field-width dropdown reads
+   as a text field the user is expected to fill. */
+select.input {
+  max-width: 240px;
+  cursor: pointer;
+}
+
+.input:focus {
+  outline: none;
+  border-color: var(--signal);
+}
+
+.input::placeholder {
+  color: var(--ink-muted);
+}
+
+.input:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Select variant of .input: replaces the OS arrow with the shared 12px
+   chevron inset like the composer's .select chips; the right pad reserves
+   its cell. */
+.selectInput {
+  appearance: none;
+  padding-right: 32px;
+  /* Data-URI SVGs cannot resolve CSS variables; the caption gray is shared
+     by both themes, so it is inlined here. */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 12px 12px;
+}
+
+.deleteDialog {
+  width: min(480px, 100%);
+}
+
+.fetchDialog {
+  max-width: 520px;
+}
+
+.error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--danger);
+}
+
+.deleteConfirm:not(:disabled) {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.deleteConfirm:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+/* Icon-button label seat: named for assistive tech and for the tests that
+   query these controls by their text. */
+.hiddenLabel {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .customizedSummary::before {
+    transition: none;
+  }
+}
+
+.candidateList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 320px;
+  margin: 0;
+  overflow-y: auto;
+  padding: 0;
+  list-style: none;
+}
+
+.candidate {
+  border-radius: 6px;
+}
+
+.candidateLabel {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+}
+
+.candidateLabel input {
+  accent-color: var(--signal);
+}
+
+.candidateId {
+  flex: 1 1 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+}

@@ -46,21 +46,21 @@ export const api = {
   settings: () => request<ModelSettings>('/api/settings'),
   saveSettings: (settings: ModelSettings) => request<ModelSettings>('/api/settings', { method: 'POST', body: JSON.stringify(settings) }),
   llmConfig: () => request<LlmConfig>('/api/llm/config'),
-  saveLlmProvider: (payload: { id?: number; name: string; base_url: string; api_key?: string }) => request<{ ok?: boolean; provider: LlmProvider; config: LlmConfig }>('/api/llm/providers', { method: 'POST', body: JSON.stringify(payload) }),
+  saveLlmProvider: (payload: { id?: number; name?: string; route?: string; protocol?: string; base_url?: string; api_key?: string; preset?: string }) => request<{ ok?: boolean; provider: LlmProvider; config: LlmConfig }>('/api/llm/providers', { method: 'POST', body: JSON.stringify(payload) }),
   removeLlmProvider: (id: number) => request<{ ok: boolean; config: LlmConfig }>(`/api/llm/providers/${id}`, { method: 'DELETE' }),
-  addLlmModel: (payload: { provider_id: number; model_id: string; display_name?: string; thinking_levels?: Record<string, Record<string, unknown>>; default_level?: string }) => request<{ ok: boolean; config: LlmConfig }>('/api/llm/models', { method: 'POST', body: JSON.stringify(payload) }),
-  addLlmModels: (payload: { provider_id: number; model_ids: string[] }) => request<{ ok: boolean; added: string[]; config: LlmConfig }>('/api/llm/models/batch', { method: 'POST', body: JSON.stringify(payload) }),
-  discoverLlmModels: (provider_id: number) => request<{ provider_id: number; models: { model_id: string; added: boolean }[] }>('/api/llm/models/discover', { method: 'POST', body: JSON.stringify({ provider_id }) }),
-  removeLlmModel: (id: number) => request<{ ok: boolean; config: LlmConfig }>(`/api/llm/models/${id}`, { method: 'DELETE' }),
+  syncLlmModels: (payload: { provider_id: number; models: LlmModelDraft[] }) => request<{ ok: boolean; config: LlmConfig }>('/api/llm/models/batch', { method: 'POST', body: JSON.stringify(payload) }),
+  discoverLlmModels: (payload: { provider_id?: number; base_url?: string; api_key?: string }) => request<{ models: { model_id: string; added: boolean }[] }>('/api/llm/models/discover', { method: 'POST', body: JSON.stringify(payload) }),
   setLlmSelection: (payload: { model_row_id: number; level?: string }) => request<{ ok: boolean; config: LlmConfig }>('/api/llm/selection', { method: 'POST', body: JSON.stringify(payload) }),
   setLlmApproval: (mode: ApprovalMode) => request<{ ok: boolean; config: LlmConfig }>('/api/llm/approval', { method: 'POST', body: JSON.stringify({ mode }) }),
 };
 
-export type LlmProvider = { id: number; name: string; base_url: string; has_api_key: boolean; builtin: number; enabled: number };
-export type LlmModel = { id: number; provider_id: number; model_id: string; display_name: string; thinking_levels: Record<string, Record<string, unknown>>; levels: string[]; default_level: string };
+export type LlmProvider = { id: number; route: string; name: string; protocol: string; base_url: string; has_api_key: boolean; builtin: number; enabled: number };
+export type LlmModelDraft = { model_id: string; display_name?: string | null; context_window?: number | null; max_tokens?: number | null };
+export type LlmModel = { id: number; provider_id: number; model_id: string; display_name: string; thinking_levels: Record<string, Record<string, unknown>>; levels: string[]; default_level: string; context_window?: number | null; max_tokens?: number | null };
+export type LlmCatalogEntry = { key: string; route: string; protocol: string; name: string; base_url: string; model_count: number; models: { model_id: string; display_name: string }[] };
 export type LlmLevelOption = { value: string; label: string };
 export type LlmSelectionEntry = { model_row_id: number; provider_id: number; provider_name: string; model_id: string; display_name: string; level: string; has_api_key: boolean };
-export type LlmConfig = { providers: LlmProvider[]; models: LlmModel[]; levels: LlmLevelOption[]; selection: LlmSelectionEntry | null; recent: LlmSelectionEntry[]; approval_mode: ApprovalMode };
+export type LlmConfig = { providers: LlmProvider[]; models: LlmModel[]; catalog: LlmCatalogEntry[]; levels: LlmLevelOption[]; selection: LlmSelectionEntry | null; recent: LlmSelectionEntry[]; approval_mode: ApprovalMode };
 export type ApprovalMode = "manual" | "auto" | "full";
 export const APPROVAL_LABELS: Record<ApprovalMode, string> = { manual: "手动审批", auto: "自动审批", full: "完全访问" };
 

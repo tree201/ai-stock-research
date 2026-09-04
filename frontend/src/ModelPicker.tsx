@@ -37,7 +37,7 @@ export function ModelPicker({ config, onConfigChange, onOpenSettings }: Props) {
   async function applySelection(modelRowId: number, level: string) {
     setBusy(true);
     try {
-      const result = await api.setLlmSelection({ model_row_id: modelRowId, level });
+      const result = await api.setLlmSelection(level ? { model_row_id: modelRowId, level } : { model_row_id: modelRowId });
       onConfigChange(result.config);
     } finally {
       setBusy(false);
@@ -45,8 +45,8 @@ export function ModelPicker({ config, onConfigChange, onOpenSettings }: Props) {
   }
 
   async function pickModel(entry: { model_row_id: number; levels: string[] }) {
-    const level = entry.levels.includes("off") || entry.levels.length === 0 ? (entry.levels[0] ?? "off") : "off";
-    await applySelection(entry.model_row_id, level);
+    // 不带档位：由后端应用模型默认档（deepseek-harness defaultEffort 语义）
+    await applySelection(entry.model_row_id, "");
     setOpen(false);
   }
 
@@ -138,9 +138,11 @@ export function ModelPicker({ config, onConfigChange, onOpenSettings }: Props) {
                 type="button"
                 disabled={busy}
                 className={`level-option ${selection.level === level ? "active" : ""}`}
+                title={level === currentModel?.default_level ? "默认档位" : undefined}
                 onClick={() => void applySelection(selection.model_row_id, level)}
               >
                 {LEVEL_LABELS[level] ?? level}
+                {level === currentModel?.default_level && <span className="level-default-dot" aria-hidden />}
               </button>
             ))
           )}

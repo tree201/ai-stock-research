@@ -22,6 +22,7 @@ import {
   Palette,
   Server,
   MoreHorizontal,
+  Download,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
@@ -658,6 +659,8 @@ export default function App() {
   const [addProviderOpen, setAddProviderOpen] = useState(false);
   const [newProvider, setNewProvider] = useState({ name: "", base_url: "", api_key: "" });
   const [newModelRows, setNewModelRows] = useState<Record<number, { model_id: string; display_name: string }>>({});
+  const [discoveredModels, setDiscoveredModels] = useState<Record<number, { model_id: string; added: boolean }[] | "loading">>({});
+  const [discoveredChecked, setDiscoveredChecked] = useState<Record<number, string[]>>({});
   const [llmBusy, setLlmBusy] = useState(false);
   const submittingRef = useRef(false);
   const [newResearchOpen, setNewResearchOpen] = useState(false);
@@ -1992,6 +1995,28 @@ export default function App() {
                                 <span className="llm-provider-name">{provider.name}</span>
                                 <span className="llm-provider-meta">{provider.base_url}</span>
                               </button>
+                              <button
+                                type="button"
+                                className="llm-discover-trigger"
+                                disabled={llmBusy || !provider.has_api_key}
+                                title={provider.has_api_key ? "从接口地址拉取可用模型列表" : "请先配置 API Key"}
+                                onClick={async () => {
+                                  setLlmBusy(true);
+                                  setDiscoveredModels({ ...discoveredModels, [provider.id]: "loading" });
+                                  try {
+                                    const result = await api.discoverLlmModels(provider.id);
+                                    setDiscoveredModels({ ...discoveredModels, [provider.id]: result.models });
+                                    setDiscoveredChecked({ ...discoveredChecked, [provider.id]: [] });
+                                  } catch (err) {
+                                    setDiscoveredModels({ ...discoveredModels, [provider.id]: [] });
+                                    setError(err instanceof Error ? err.message : "模型拉取失败");
+                                  } finally {
+                                    setLlmBusy(false);
+                                  }
+                                }}
+                              >
+                                <Download size={12} /> 拉取模型
+                              </button>
                               <span
                                 className={`llm-key-badge ${provider.has_api_key ? "ok" : "missing"}`}
                               >
@@ -2118,6 +2143,90 @@ export default function App() {
                                   </button>
                                 </div>
                               ))}
+                              {discoveredModels[provider.id] === "loading" && (
+                                <div className="llm-discover-panel">正在拉取模型列表…</div>
+                              )}
+                              {Array.isArray(discoveredModels[provider.id]) && (
+                                <div className="llm-discover-panel">
+                                  {(() => {
+                                    const remote = discoveredModels[provider.id] as { model_id: string; added: boolean }[];
+                                    const fresh = remote.filter((item) => !item.added);
+                                    const checked = discoveredChecked[provider.id] ?? [];
+                                    if (fresh.length === 0) {
+                                      return <span className="llm-discover-empty">远端模型均已加入目录</span>;
+                                    }
+                                    return (
+                                      <>
+                                        <div className="llm-discover-list">
+                                          {fresh.map((item) => (
+                                            <label key={item.model_id} className="llm-discover-item">
+                                              <input
+                                                type="checkbox"
+                                                checked={checked.includes(item.model_id)}
+                                                onChange={(e) =>
+                                                  setDiscoveredChecked({
+                                                    ...discoveredChecked,
+                                                    [provider.id]: e.target.checked
+                                                      ? [...checked, item.model_id]
+                                                      : checked.filter((id) => id !== item.model_id),
+                                                  })
+                                                }
+                                              />
+                                              <span>{item.model_id}</span>
+                                            </label>
+                                          ))}
+                                        </div>
+                                        <div className="llm-discover-actions">
+                                          <button
+                                            type="button"
+                                            disabled={llmBusy || checked.length === 0}
+                                            onClick={async () => {
+                                              setLlmBusy(true);
+                                              try {
+                                                const result = await api.addLlmModels({
+                                                  provider_id: provider.id,
+                                                  model_ids: checked,
+                                                });
+                                                setLlmConfig(result.config);
+                                                setDiscoveredModels({
+                                                  ...discoveredModels,
+                                                  [provider.id]: (discoveredModels[provider.id] as { model_id: string; added: boolean }[]).map(
+                                                    (item) => ({ ...item, added: item.added || checked.includes(item.model_id) }),
+                                                  ),
+                                                });
+                                                setDiscoveredChecked({ ...discoveredChecked, [provider.id]: [] });
+                                              } catch (err) {
+                                                setError(err instanceof Error ? err.message : "模型导入失败");
+                                              } finally {
+                                                setLlmBusy(false);
+                                              }
+                                            }}
+                                          >
+                                            <Plus size={12} /> 导入选中（{checked.length}）
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setDiscoveredChecked({ ...discoveredChecked, [provider.id]: fresh.map((item) => item.model_id) })
+                                            }
+                                          >
+                                            全选
+                                          </button>
+                                          <button
+                                            type="button"
+                                            onClick={() => {
+                                              setDiscoveredModels({ ...discoveredModels, [provider.id]: [] });
+                                              setDiscoveredChecked({ ...discoveredChecked, [provider.id]: [] });
+                                            }}
+                                          >
+                                            收起
+                                          </button>
+                                        </div>
+                                      </>
+                                    );
+                                  })()}
+                                </div>
+                              )}
                               <div className="llm-model-add">
                                 <input
                                   placeholder="模型 ID，如 glm-4.6"

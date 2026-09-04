@@ -22,6 +22,18 @@ class WebMvpTests(unittest.TestCase):
         # missing real provider (covered explicitly below).
         self._provider_patch = patch("stock_research.service.resolve_provider", return_value=HeuristicLLMProvider())
         self._provider_patch.start()
+        # Safety net: any service call that falls back to the default database
+        # path must never touch the developer's real ./research.sqlite3.
+        # Patching the env (not the function) keeps tests that mix an explicit
+        # db_path with default-path calls pointed at the same isolated store.
+        self._isolation_dir = TemporaryDirectory()
+        self.addCleanup(self._isolation_dir.cleanup)
+        self._db_env_patch = patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{self._isolation_dir.name}/research.sqlite3"},
+        )
+        self._db_env_patch.start()
+        self.addCleanup(self._db_env_patch.stop)
 
     def tearDown(self) -> None:
         self._provider_patch.stop()
@@ -98,8 +110,9 @@ class WebMvpTests(unittest.TestCase):
             self.assertEqual(failed["status"], "failed")
             self.assertEqual(failed["error"]["type"], "ValueError")
             reopened.close()
+
     def test_research_payload_returns_structured_report(self) -> None:
-        with patch.dict(os.environ, {"DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""}, clear=False):
+        with TemporaryDirectory() as directory, patch.dict(os.environ, {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""}, clear=False):
             report = run_research_payload({
                 "name": "腾讯（示例）",
                 "symbol": "00700",

@@ -237,6 +237,8 @@ def run_research_payload(payload: dict[str, Any], db_path: str | Path | None = N
             store.save_session_message(SessionMessage(session.id, "user", "text", {"text": question}))
         payload = merged_research_payload(store, project, payload)
         documents = research_documents(payload, project.company_id, as_of_date)
+        resume_raw = payload.get("_resume_run_id")
+        resume_run_id = UUID(str(resume_raw)) if resume_raw else None
         report = pipeline.run(
             project_id=project.id,
             session_id=session.id,
@@ -244,6 +246,7 @@ def run_research_payload(payload: dict[str, Any], db_path: str | Path | None = N
             as_of_date=as_of_date,
             documents=documents,
             dcf_assumptions=default_dcf_assumptions(),
+            resume_run_id=resume_run_id,
         )
         report["session_id"] = str(session.id)
         store.save_session_message(SessionMessage(session.id, "assistant", "report_card", {"text": "研究已完成", "report_id": report["report_id"], "summary": report.get("summary", [])}, run_id=UUID(report["run_id"]), report_id=UUID(report["report_id"])))

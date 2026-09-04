@@ -73,6 +73,35 @@ class ResearchWorkflow:
         self._emit(run, "run/created", {"question": run.question, "as_of_date": str(as_of_date), "run_type": run_type})
         return run
 
+    def adopt_run(self, run_id: UUID) -> ResearchRun:
+        """Adopt a persisted, non-terminal run so the pipeline can resume it.
+
+        Steps left in ``running`` state by a dead process are reset to
+        ``pending``: the pipeline only persists artifacts at step completion
+        boundaries, so their partial work is not committed anyway.  Non-PAUSED
+        runs are parked in PAUSED first, which every active status allows;
+        fully completed runs (crash between compile and finish) move to
+        REVIEWING so ``finish()`` can run.
+        """
+        if self.store is None:
+            raise ValueError("adopt_run requires a store")
+        run = self.store.load_run(run_id)
+        if run.status in {RunStatus.COMPLETED, RunStatus.CANCELED}:
+            raise ValueError(f"cannot adopt a {run.status.value} run")
+        if run.steps and all(step.status == "completed" for step in run.steps):
+            if run.status != RunStatus.REVIEWING:
+                run.transition(RunStatus.REVIEWING)
+        elif run.status not in {RunStatus.CREATED, RunStatus.PAUSED}:
+            run.transition(RunStatus.PAUSED)
+        for step in run.steps:
+            if step.status == "running":
+                step.status = "pending"
+                step.started_at = None
+        self.projects[run.project_id] = self.store.load_project(run.project_id)
+        self.runs[run.id] = run
+        self._emit(run, "run/resumed", {"status": run.status.value, "completed_steps": [step.step_key for step in run.steps if step.status == "completed"]})
+        return run
+
     def plan(self, run_id: UUID, steps: tuple[tuple[str, str], ...] = DEFAULT_STEPS) -> ResearchRun:
         run = self._get_run(run_id)
         run.transition(RunStatus.PLANNED)

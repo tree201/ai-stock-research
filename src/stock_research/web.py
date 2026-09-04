@@ -230,6 +230,7 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
 
 
 def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
+    _recover_jobs_in_background()
     server = ThreadingHTTPServer((host, port), ResearchRequestHandler)
     print(f"AI Stock Research MVP running at http://{host}:{port}")
     try:
@@ -238,3 +239,21 @@ def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
         pass
     finally:
         server.server_close()
+
+
+def _recover_jobs_in_background() -> None:
+    """Resume jobs interrupted by a previous process, without blocking startup."""
+    from .jobs import recover_stuck_jobs
+    from .service import database_path
+
+    def _run() -> None:
+        try:
+            summary = recover_stuck_jobs(database_path())
+            if summary.get("recovered") or summary.get("failed"):
+                print(f"任务恢复完成：续跑 {summary.get('recovered', 0)} 个，放弃 {summary.get('failed', 0)} 个")
+        except Exception as exc:  # recovery must never block the server
+            print(f"任务恢复失败：{exc}")
+
+    import threading
+
+    threading.Thread(target=_run, name="job-recovery", daemon=True).start()

@@ -42,6 +42,14 @@ def main() -> int:
             from rq import Queue, Worker
         except ImportError as exc:
             parser.error("--worker requires optional dependencies: pip install 'stock-research-agent[worker]'")
+        if args.db:
+            os.environ["AI_STOCK_DB"] = args.db
+        from .jobs import recover_stuck_jobs
+        try:
+            summary = recover_stuck_jobs(os.environ.get("AI_STOCK_DB", "./research.sqlite3"))
+            print(f"任务恢复完成：续跑 {summary.get('recovered', 0)} 个，放弃 {summary.get('failed', 0)} 个")
+        except Exception as exc:
+            print(f"任务恢复失败：{exc}")
         connection = redis.from_url(args.redis_url)
         queue = Queue(args.queue, connection=connection)
         print(f"AI Stock Research worker listening on '{args.queue}' ({args.redis_url})")

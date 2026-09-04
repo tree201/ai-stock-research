@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from .calculations import CalculationResult, cagr, dcf, free_cash_flow, net_cash, ratio
 from .context import ContextBuilder
-from .documents import DocumentIngestor, RawDocument
+from .documents import DocumentIngestor, EvidenceChunk, RawDocument
 from .facts import FactCandidate, FinancialFactExtractor
 from .report import ReportBuilder
 from .llm import AnalysisRequest, LLMProvider
@@ -40,93 +40,188 @@ class ResearchPipeline:
         dcf_assumptions: dict[str, float | list[float]] | None = None,
         run_type: str = "initial",
         report_transform: Callable[[dict], dict] | None = None,
+        resume_run_id: UUID | None = None,
     ) -> dict:
-        run = self.workflow.create_run(project_id, question, as_of_date, run_type=run_type, session_id=session_id)
-        self.workflow.plan(run.id)
+        store = self.workflow.store
+        if resume_run_id is not None:
+            # Checkpoint resume: adopt the persisted run and reuse the stored
+            # artifacts of every already-completed step instead of redoing
+            # downloads, extraction or model calls.
+            run = self.workflow.adopt_run(resume_run_id)
+            completed = {step.step_key for step in run.steps if step.status == "completed"}
+            question = run.question
+            as_of_date = run.as_of_date
+            session_id = run.session_id
+            project_id = run.project_id
+        else:
+            run = self.workflow.create_run(project_id, question, as_of_date, run_type=run_type, session_id=session_id)
+            completed = set()
+            self.workflow.plan(run.id)
+        artifacts = store.load_run_artifacts(run.id) if store else {}
         documents = [document for document in documents if not document.published_at or document.published_at.date() <= as_of_date]
-        if not documents:
-            raise ValueError("no documents available before as_of_date")
 
-        self.workflow.start_next_step(run.id)
-        chunks = self.document_ingestor.chunk_many(documents)
-        documents_by_id = {document.id: document for document in documents}
-        evidence_sources = {
-            str(chunk.id): {
-                "source_url": documents_by_id[chunk.document_id].source_url,
-                "source_title": documents_by_id[chunk.document_id].title,
-                "page": chunk.page,
+        chunks = []
+        evidence_sources = {}
+        if "collect_filings" in completed:
+            chunks = [self._chunk_from_row(row) for row in artifacts.get("evidence", [])]
+            documents_by_id = {row["id"]: row for row in artifacts.get("documents", [])}
+            evidence_sources = {
+                str(chunk.id): {
+                    "source_url": documents_by_id.get(str(chunk.document_id), {}).get("source_url", ""),
+                    "source_title": documents_by_id.get(str(chunk.document_id), {}).get("title", ""),
+                    "page": chunk.page,
+                }
+                for chunk in chunks
             }
-            for chunk in chunks
-            if chunk.document_id in documents_by_id
-        }
-        if self.workflow.store:
-            self.workflow.store.save_documents(run.id, documents)
-            self.workflow.store.save_evidence_chunks(chunks)
-        self.workflow.complete_step(run.id, "collect_filings", {"document_count": len(documents), "evidence_count": len(chunks)})
+        else:
+            if not documents:
+                raise ValueError("no documents available before as_of_date")
+            self.workflow.start_next_step(run.id)
+            chunks = self.document_ingestor.chunk_many(documents)
+            documents_by_id = {document.id: document for document in documents}
+            evidence_sources = {
+                str(chunk.id): {
+                    "source_url": documents_by_id[chunk.document_id].source_url,
+                    "source_title": documents_by_id[chunk.document_id].title,
+                    "page": chunk.page,
+                }
+                for chunk in chunks
+                if chunk.document_id in documents_by_id
+            }
+            if store:
+                store.save_documents(run.id, documents)
+                store.save_evidence_chunks(chunks)
+            self.workflow.complete_step(run.id, "collect_filings", {"document_count": len(documents), "evidence_count": len(chunks)})
 
-        self.workflow.start_next_step(run.id)
-        facts = self.fact_extractor.extract(chunks)
-        if self.workflow.store:
-            self.workflow.store.save_facts(run.id, facts)
-        self.workflow.complete_step(run.id, "extract_financials", {"fact_count": len(facts)})
+        facts = []
+        if "extract_financials" in completed:
+            facts = [self._fact_from_row(row) for row in artifacts.get("facts", [])]
+        else:
+            self.workflow.start_next_step(run.id)
+            facts = self.fact_extractor.extract(chunks)
+            if store:
+                store.save_facts(run.id, facts)
+            self.workflow.complete_step(run.id, "extract_financials", {"fact_count": len(facts)})
 
         qualitative_signals = self._signals(chunks)
         llm_claims: list[dict] = []
         llm_usage: dict | None = None
         llm_evidence_count = 0
-        if self.llm_provider:
-            selected_chunks = self.context_builder.select(chunks, question)
-            evidence = tuple({"evidence_id": str(chunk.id), "text": chunk.text} for chunk in selected_chunks)
-            llm_evidence_count = len(evidence)
-            analysis = self.llm_provider.analyze(AnalysisRequest(question, as_of_date, evidence))
-            llm_usage = analysis.usage
-            llm_claims = [
-                {"category": claim.category, "text": claim.text, "evidence_ids": list(claim.evidence_ids), "confidence": claim.confidence, "counter_evidence_ids": list(claim.counter_evidence_ids), "provider": analysis.provider, "model": analysis.model}
-                for claim in analysis.claims
-            ]
-        if self.workflow.store:
-            self.workflow.store.save_claims(run.id, llm_claims)
-        self.workflow.start_next_step(run.id)
-        self.workflow.complete_step(run.id, "analyze_business", {"signal_count": len(qualitative_signals.get("business", [])), "llm_claim_count": len(llm_claims), "llm_evidence_count": llm_evidence_count, "llm_evidence_total": len(chunks), "llm_usage": llm_usage})
+        if "analyze_business" in completed:
+            llm_claims = [self._claim_from_row(row) for row in artifacts.get("claims", [])]
+        else:
+            if self.llm_provider:
+                selected_chunks = self.context_builder.select(chunks, question)
+                evidence = tuple({"evidence_id": str(chunk.id), "text": chunk.text} for chunk in selected_chunks)
+                llm_evidence_count = len(evidence)
+                analysis = self.llm_provider.analyze(AnalysisRequest(question, as_of_date, evidence))
+                llm_usage = analysis.usage
+                llm_claims = [
+                    {"category": claim.category, "text": claim.text, "evidence_ids": list(claim.evidence_ids), "confidence": claim.confidence, "counter_evidence_ids": list(claim.counter_evidence_ids), "provider": analysis.provider, "model": analysis.model}
+                    for claim in analysis.claims
+                ]
+            if store:
+                store.save_claims(run.id, llm_claims)
+            self.workflow.start_next_step(run.id)
+            self.workflow.complete_step(run.id, "analyze_business", {"signal_count": len(qualitative_signals.get("business", [])), "llm_claim_count": len(llm_claims), "llm_evidence_count": llm_evidence_count, "llm_evidence_total": len(chunks), "llm_usage": llm_usage})
 
-        self.workflow.start_next_step(run.id)
-        self.workflow.complete_step(run.id, "analyze_risks", {"signal_count": len(qualitative_signals.get("risks", [])), "llm_claim_count": len(llm_claims)})
+        if "analyze_risks" not in completed:
+            self.workflow.start_next_step(run.id)
+            self.workflow.complete_step(run.id, "analyze_risks", {"signal_count": len(qualitative_signals.get("risks", [])), "llm_claim_count": len(llm_claims)})
 
-        self.workflow.start_next_step(run.id)
-        calculations = self._calculate(facts, dcf_assumptions)
-        if self.workflow.store:
-            self.workflow.store.save_calculations(run.id, calculations)
-        self.workflow.complete_step(run.id, "calculate_valuation", {"calculation_count": len(calculations)})
+        calculations: list[CalculationResult] = []
+        if "calculate_valuation" in completed:
+            calculations = [self._calculation_from_row(row) for row in artifacts.get("calculations", [])]
+        else:
+            self.workflow.start_next_step(run.id)
+            calculations = self._calculate(facts, dcf_assumptions)
+            if store:
+                store.save_calculations(run.id, calculations)
+            self.workflow.complete_step(run.id, "calculate_valuation", {"calculation_count": len(calculations)})
 
-        self.workflow.start_next_step(run.id)
-        review = self._review(facts, calculations, as_of_date)
-        if review["status"] == "needs_review":
-            raise ValueError(f"research review failed: {review['issues']}")
-        self.workflow.complete_step(run.id, "review", review)
+        review: dict | None = None
+        review_step = next((step for step in run.steps if step.step_key == "review"), None)
+        if review_step is not None and review_step.status == "completed":
+            review = review_step.output_data or None
+        if review is None:
+            self.workflow.start_next_step(run.id)
+            review = self._review(facts, calculations, as_of_date)
+            if review["status"] == "needs_review":
+                raise ValueError(f"research review failed: {review['issues']}")
+            self.workflow.complete_step(run.id, "review", review)
 
-        self.workflow.start_next_step(run.id)
-        project = self.workflow.projects[run.project_id]
-        report = self.report_builder.build(
-            company={"symbol": project.symbol, "name": project.name, "market": project.market},
-            question=question,
-            as_of_date=as_of_date,
-            facts=facts,
-            calculations=calculations,
-            qualitative_signals=qualitative_signals,
-            llm_claims=llm_claims,
-            review=review,
-            evidence_sources=evidence_sources,
-        )
-        self.workflow.complete_step(run.id, "compile_report", {"report_ready": True})
+        report: dict | None = None
+        if "compile_report" in completed and artifacts.get("reports"):
+            report = store.load_report(UUID(artifacts["reports"][-1]["id"]))
+        if report is None:
+            self.workflow.start_next_step(run.id)
+            project = self.workflow.projects[run.project_id]
+            report = self.report_builder.build(
+                company={"symbol": project.symbol, "name": project.name, "market": project.market},
+                question=question,
+                as_of_date=as_of_date,
+                facts=facts,
+                calculations=calculations,
+                qualitative_signals=qualitative_signals,
+                llm_claims=llm_claims,
+                review=review,
+                evidence_sources=evidence_sources,
+            )
+            self.workflow.complete_step(run.id, "compile_report", {"report_ready": True})
         self.workflow.finish(run.id)
-        report["report_id"] = str(uuid4())
+        report.setdefault("report_id", str(uuid4()))
         report["run_id"] = str(run.id)
         report["plan_version"] = run.plan_version
         if report_transform is not None:
             report = report_transform(report)
-        if self.workflow.store:
-            self.workflow.store.save_report(run.id, report, UUID(report["report_id"]))
+        if store:
+            store.save_report(run.id, report, UUID(report["report_id"]))
         return report
+
+    @staticmethod
+    def _chunk_from_row(row: dict) -> EvidenceChunk:
+        from datetime import datetime as _datetime
+        return EvidenceChunk(
+            document_id=UUID(row["document_id"]),
+            chunk_index=int(row["chunk_index"]),
+            text=row["text"],
+            start_line=int(row["start_line"]),
+            end_line=int(row["end_line"]),
+            published_at=_datetime.fromisoformat(row["published_at"]) if row.get("published_at") else None,
+            page=row.get("page"),
+            section=row.get("section"),
+            id=UUID(row["id"]),
+        )
+
+    @staticmethod
+    def _fact_from_row(row: dict) -> FactCandidate:
+        return FactCandidate(
+            metric=str(row["metric"]),
+            value=float(row["value"]),
+            currency=row.get("currency"),
+            unit=row.get("unit"),
+            period_end=date.fromisoformat(row["period_end"]) if row.get("period_end") else None,
+            evidence_id=UUID(row["evidence_id"]),
+            source_line=int(row["source_line"]),
+            raw_text=str(row["raw_text"]),
+            confidence=float(row["confidence"]),
+        )
+
+    @staticmethod
+    def _calculation_from_row(row: dict) -> CalculationResult:
+        return CalculationResult(row["calculation_type"], row["formula_version"], row["inputs"], row["outputs"])
+
+    @staticmethod
+    def _claim_from_row(row: dict) -> dict:
+        return {
+            "category": row.get("category", "general"),
+            "text": row.get("text", ""),
+            "evidence_ids": row.get("evidence_ids", []),
+            "confidence": float(row.get("confidence", 0.0)),
+            "counter_evidence_ids": row.get("counter_evidence_ids", []),
+            "provider": row.get("provider"),
+            "model": row.get("model"),
+        }
 
     @staticmethod
     def _calculate(facts: list[FactCandidate], assumptions: dict[str, float | list[float]] | None) -> list[CalculationResult]:

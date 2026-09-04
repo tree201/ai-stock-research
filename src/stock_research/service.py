@@ -17,7 +17,9 @@ from uuid import UUID, uuid4
 
 from .documents import FetchedDocument, HttpDocumentFetcher, PdfTextExtractor, RawDocument, UnsupportedDocumentType, extract_text
 from .domain import ResearchProject, ResearchSession, SessionMessage, utc_now
+from .facts import FactCandidate
 from .pipeline import ResearchPipeline
+from .report import ReportBuilder, diff_reports
 from .llm import LLMError, ModelNotConfiguredError, provider_from_config, provider_from_env
 from .storage import SQLiteStore
 from .workflow import ResearchWorkflow
@@ -184,7 +186,38 @@ def ensure_session(store: SQLiteStore, project: ResearchProject, session_id: UUI
     return store.find_active_session(project.id) or ResearchSession(project_id=project.id, title=title)
 
 
+def default_dcf_assumptions() -> dict[str, Any]:
+    return {
+        "revenue_prior": 609_000_000_000,
+        "revenue_years": 1,
+        "growth_rates": [0.15, 0.12, 0.10, 0.08, 0.06],
+        "discount_rate": 0.09,
+        "terminal_growth": 0.03,
+        "shares": 9_000_000_000,
+    }
+
+
+def merged_research_payload(store: SQLiteStore, project: ResearchProject, payload: dict[str, Any]) -> dict[str, Any]:
+    """Merge requested document URLs with the company's registered sources."""
+    requested_urls = payload.get("document_urls") or payload.get("document_url") or []
+    if isinstance(requested_urls, str):
+        requested_urls = [value.strip() for value in requested_urls.replace(",", "\n").splitlines() if value.strip()]
+    if not isinstance(requested_urls, list):
+        requested_urls = []
+    registered_urls = store.list_company_source_urls(project.company_id)
+    seen: set[str] = set()
+    merged: list[str] = []
+    for url in [*requested_urls, *registered_urls]:
+        value = str(url).strip()
+        if value and value not in seen:
+            seen.add(value)
+            merged.append(value)
+    return {**payload, "document_urls": merged}
+
+
 def run_research_payload(payload: dict[str, Any], db_path: str | Path | None = None, session_id: UUID | None = None) -> dict[str, Any]:
+    if str(payload.get("mode", "")).strip().casefold() == "update":
+        return run_update_payload(payload, db_path=db_path, session_id=session_id)
     name = str(payload.get("name", "")).strip()
     symbol = str(payload.get("symbol", "")).strip()
     question = str(payload.get("question", "")).strip()
@@ -202,18 +235,7 @@ def run_research_payload(payload: dict[str, Any], db_path: str | Path | None = N
         pipeline.workflow.create_session(session)
         if not payload.get("_session_message_saved"):
             store.save_session_message(SessionMessage(session.id, "user", "text", {"text": question}))
-        requested_urls = payload.get("document_urls") or payload.get("document_url") or []
-        if isinstance(requested_urls, str):
-            requested_urls = [value.strip() for value in requested_urls.replace(",", "\n").splitlines() if value.strip()]
-        registered_urls = store.list_company_source_urls(project.company_id)
-        seen: set[str] = set()
-        merged_urls: list[str] = []
-        for url in [*requested_urls, *registered_urls]:
-            value = str(url).strip()
-            if value and value not in seen:
-                seen.add(value)
-                merged_urls.append(value)
-        payload = {**payload, "document_urls": merged_urls}
+        payload = merged_research_payload(store, project, payload)
         documents = research_documents(payload, project.company_id, as_of_date)
         report = pipeline.run(
             project_id=project.id,
@@ -221,14 +243,7 @@ def run_research_payload(payload: dict[str, Any], db_path: str | Path | None = N
             question=question,
             as_of_date=as_of_date,
             documents=documents,
-            dcf_assumptions={
-                "revenue_prior": 609_000_000_000,
-                "revenue_years": 1,
-                "growth_rates": [0.15, 0.12, 0.10, 0.08, 0.06],
-                "discount_rate": 0.09,
-                "terminal_growth": 0.03,
-                "shares": 9_000_000_000,
-            },
+            dcf_assumptions=default_dcf_assumptions(),
         )
         report["session_id"] = str(session.id)
         store.save_session_message(SessionMessage(session.id, "assistant", "report_card", {"text": "研究已完成", "report_id": report["report_id"], "summary": report.get("summary", [])}, run_id=UUID(report["run_id"]), report_id=UUID(report["report_id"])))
@@ -240,7 +255,163 @@ def run_research_payload(payload: dict[str, Any], db_path: str | Path | None = N
         store.close()
 
 
+def run_update_payload(payload: dict[str, Any], db_path: str | Path | None = None, session_id: UUID | None = None) -> dict[str, Any]:
+    """Incremental update: ingest only documents unseen in previous runs.
+
+    New documents are identified by content hash against everything already
+    ingested for the company.  The fresh run then produces a report that is
+    diffed against the most recent one (new facts, changed values and the
+    base-scenario valuation move).
+    """
+    name = str(payload.get("name", "")).strip()
+    symbol = str(payload.get("symbol", "")).strip()
+    question = str(payload.get("question", "")).strip()
+    as_of_date = date.fromisoformat(str(payload.get("as_of_date", "")))
+    if not name or not symbol or not question:
+        raise ValueError("name, symbol and question are required")
+    store = SQLiteStore(db_path or database_path())
+    try:
+        project = store.find_project(symbol)
+        if project is None:
+            raise ValueError("没有找到该公司的研究档案，请先完成一次初始研究再运行更新。")
+        report_rows = store.list_project_reports(project.id)
+        if not report_rows:
+            raise ValueError("没有历史报告可对比，请先完成一次初始研究。")
+        previous = store.load_report(UUID(report_rows[0]["id"]))
+        project.updated_at = utc_now()
+        pipeline = ResearchPipeline(workflow=ResearchWorkflow(store=store), llm_provider=resolve_provider(payload.get("llm")))
+        pipeline.workflow.create_project(project)
+        session = ensure_session(store, project, session_id, title=session_title(question))
+        pipeline.workflow.create_session(session)
+        if not payload.get("_session_message_saved"):
+            store.save_session_message(SessionMessage(session.id, "user", "text", {"text": question}))
+        merged = merged_research_payload(store, project, payload)
+        documents = research_documents(merged, project.company_id, as_of_date)
+        seen_hashes = store.list_seen_content_hashes(project.company_id)
+        new_documents = [document for document in documents if document.content_hash not in seen_hashes]
+        if not new_documents:
+            raise ValueError("未检测到新资料：登记源中没有上次研究之后的新文档；可先在「公司档案 → 资料」登记新的公告链接，或粘贴新的财报文本。")
+
+        def attach_diff(report: dict[str, Any]) -> dict[str, Any]:
+            report["diff"] = diff_reports(previous, report)
+            report["update_of"] = str(previous.get("report_id"))
+            report["markdown"] = ReportBuilder.to_markdown(report)
+            return report
+
+        report = pipeline.run(
+            project_id=project.id,
+            session_id=session.id,
+            question=question,
+            as_of_date=as_of_date,
+            documents=new_documents,
+            dcf_assumptions=default_dcf_assumptions(),
+            run_type="update",
+            report_transform=attach_diff,
+        )
+        report["session_id"] = str(session.id)
+        store.save_session_message(SessionMessage(session.id, "assistant", "report_card", {"text": "增量更新完成", "report_id": report["report_id"], "summary": report.get("summary", [])}, run_id=UUID(report["run_id"]), report_id=UUID(report["report_id"])))
+        session.active_run_id = None
+        session.updated_at = utc_now()
+        store.save_session(session)
+        return report
+    finally:
+        store.close()
+
+
 SEARCH_INTENT_WORDS = ("搜", "联网", "网络", "最新", "最近", "新闻", "资讯", "消息", "公告", "股价", "行情", "价格")
+
+
+ASSUMPTION_KEYS = frozenset({"revenue_prior", "revenue_years", "growth_rates", "discount_rate", "terminal_growth", "shares", "base_fcf", "net_cash"})
+
+
+def parse_dcf_assumptions(payload: Any) -> dict[str, Any]:
+    """Validate user-supplied valuation assumptions at the service boundary."""
+    if payload is None:
+        return {}
+    if not isinstance(payload, dict):
+        raise ValueError("dcf_assumptions must be an object")
+    unknown = set(payload) - ASSUMPTION_KEYS
+    if unknown:
+        raise ValueError(f"unknown assumption keys: {', '.join(sorted(str(key) for key in unknown))}")
+    assumptions: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key == "growth_rates":
+            if not isinstance(value, list) or not value or any(isinstance(item, bool) or not isinstance(item, (int, float)) for item in value):
+                raise ValueError("growth_rates must be a non-empty list of numbers")
+            assumptions[key] = [float(item) for item in value]
+        else:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(f"{key} must be a number")
+            assumptions[key] = float(value)
+    return assumptions
+
+
+def recalculate_report(report_id: str, assumptions: dict[str, Any] | None = None, db_path: str | Path | None = None) -> dict[str, Any]:
+    """Re-run valuation and report assembly from a previous report's facts.
+
+    Facts, qualitative signals and model claims are reused verbatim; only the
+    code-driven calculation and report compilation run again.  The result is
+    persisted as a new report version on the same run, so no model call and
+    no document download is required.
+    """
+    dcf_assumptions = parse_dcf_assumptions(assumptions)
+    store = SQLiteStore(db_path or database_path())
+    try:
+        previous = store.load_report(UUID(str(report_id)))
+        run_id = UUID(previous["run_id"])
+        run = store.load_run(run_id)
+        project = store.load_project(run.project_id)
+        facts: list[FactCandidate] = []
+        evidence_sources: dict[str, dict[str, Any]] = {}
+        for row in previous.get("facts", []):
+            citation = row.get("citation") or {}
+            evidence_id = citation.get("evidence_id")
+            if evidence_id:
+                evidence_sources[str(evidence_id)] = {key: citation[key] for key in ("source_url", "source_title", "page") if key in citation}
+            facts.append(FactCandidate(
+                metric=str(row["metric"]),
+                value=float(row["value"]),
+                currency=row.get("currency"),
+                unit=row.get("unit"),
+                period_end=date.fromisoformat(row["period_end"]) if row.get("period_end") else None,
+                evidence_id=UUID(str(evidence_id)) if evidence_id else uuid4(),
+                source_line=int(citation.get("source_line", 0)),
+                raw_text=str(citation.get("raw_text", "")),
+                confidence=float(row.get("confidence", 0.0)),
+            ))
+        calculations = ResearchPipeline._calculate(facts, dcf_assumptions)
+        review = ResearchPipeline._review(facts, calculations, run.as_of_date)
+        report = ReportBuilder().build(
+            company={"symbol": project.symbol, "name": project.name, "market": project.market},
+            question=run.question,
+            as_of_date=run.as_of_date,
+            facts=facts,
+            calculations=calculations,
+            qualitative_signals=previous.get("qualitative_signals") or {},
+            llm_claims=previous.get("llm_claims") or [],
+            review=review,
+            evidence_sources=evidence_sources,
+        )
+        report["report_id"] = str(uuid4())
+        report["recalculated_from"] = str(previous["report_id"])
+        report["dcf_assumptions"] = dcf_assumptions
+        saved_id = store.save_report(run_id, report, UUID(report["report_id"]))
+        version_row = store.connection.execute("SELECT version FROM reports WHERE id=?", (str(saved_id),)).fetchone()
+        report["version"] = int(version_row[0]) if version_row else None
+        store.append_event(run_id, "report/recalculated", {
+            "report_id": str(saved_id),
+            "previous_report_id": str(previous["report_id"]),
+            "dcf_assumptions": dcf_assumptions,
+        }, utc_now())
+        if run.session_id:
+            store.save_session_message(SessionMessage(
+                run.session_id, "assistant", "report_card",
+                {"text": "估值假设已调整，报告已基于同一批事实重新计算", "report_id": str(saved_id), "summary": report.get("summary", [])},
+                run_id=run_id, report_id=saved_id,
+            ))
+        return report
+    finally:
+        store.close()
 
 
 def answer_follow_up(provider: Any, content: str, report_context: str, project: ResearchProject) -> str:
@@ -276,11 +447,11 @@ def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = No
         project = store.load_project(session.project_id)
         resolve_provider(llm_config)
         lowered = content.casefold()
-        research_intent = any(word in lowered for word in ("研究", "分析", "估值", "长期持有", "更新研究"))
+        research_intent = any(word in lowered for word in ("研究", "分析", "估值", "长期持有", "更新"))
         if research_intent:
             if as_of_date is None:
                 as_of_date = date.today()
-            research_payload = {"name": project.name, "symbol": project.symbol, "as_of_date": as_of_date.isoformat(), "question": content, "_session_message_saved": True, "llm": llm_config, "document_urls": document_urls}
+            research_payload = {"name": project.name, "symbol": project.symbol, "as_of_date": as_of_date.isoformat(), "question": content, "_session_message_saved": True, "llm": llm_config, "document_urls": document_urls, "mode": "update" if "更新" in lowered else "initial"}
             store.save_session_message(SessionMessage(session_id, "user", "text", {"text": content}))
             if os.getenv("AI_STOCK_QUEUE", "inline").casefold() == "rq":
                 job = create_and_enqueue(store, session_id, research_payload, db_path or database_path())

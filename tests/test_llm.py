@@ -21,10 +21,17 @@ class LLMTests(unittest.TestCase):
         self.assertEqual(response.claims[0].evidence_ids, ("e1",))
 
     def test_openai_compatible_provider_validates_citations(self) -> None:
-        payload = {"choices": [{"message": {"content": json.dumps({"claims": [{"category": "business", "text": "Cloud growth matters", "evidence_ids": ["e1"], "confidence": 0.8}]})}}]}
+        payload = {
+            "choices": [{"message": {"content": json.dumps({"claims": [{"category": "business", "text": "Cloud growth matters", "evidence_ids": ["e1"], "confidence": 0.8}]})}}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 30},
+        }
         provider = OpenAICompatibleProvider("https://example.test/v1", "key", "model", opener=lambda *_args, **_kwargs: _Response(payload))
         response = provider.analyze(AnalysisRequest("研究公司", date(2025, 12, 31), ({"evidence_id": "e1", "text": "Cloud growth"},)))
         self.assertEqual(response.claims[0].evidence_ids, ("e1",))
+        self.assertEqual(response.usage["prompt_tokens"], 120)
+        self.assertEqual(response.usage["completion_tokens"], 30)
+        self.assertEqual(response.usage["prompt_version"], "analyze-v1")
+        self.assertIn("elapsed_ms", response.usage)
 
         invalid = {"choices": [{"message": {"content": json.dumps({"claims": [{"category": "business", "text": "unsupported", "evidence_ids": ["missing"], "confidence": 0.8}]})}}]}
         provider = OpenAICompatibleProvider("https://example.test/v1", "key", "model", opener=lambda *_args, **_kwargs: _Response(invalid))

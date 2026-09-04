@@ -9,7 +9,7 @@ from uuid import UUID
 from stock_research.documents import FetchedDocument
 from stock_research.llm import HeuristicLLMProvider, ModelNotConfiguredError
 from stock_research.market_data import PriceBar
-from stock_research.service import add_company_source, chat_entry_payload, chat_payload, history_payload, provider_status, remove_company_source, research_documents, resolve_provider, run_research_payload
+from stock_research.service import add_company_source, chat_entry_payload, chat_payload, history_payload, provider_status, recalculate_report, remove_company_source, research_documents, resolve_provider, run_research_payload, run_update_payload
 from stock_research.jobs import InlineQueue, create_and_enqueue, execute_research_job
 from stock_research.storage import SQLiteStore
 from stock_research.web_search import SearchResult
@@ -160,6 +160,141 @@ class WebMvpTests(unittest.TestCase):
             self.assertGreaterEqual(len(restored["artifacts"]["facts"]), 2)
             self.assertEqual(restored["artifacts"]["reports"][0]["id"], report["report_id"])
             self.assertEqual(history_payload(f"/api/reports/{report['report_id']}")["report_id"], report["report_id"])
+
+    def test_recalculate_report_reuses_facts_and_creates_new_version(self) -> None:
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
+            clear=False,
+        ):
+            report = run_research_payload({
+                "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
+                "document": (
+                    "Revenue FY2024 HK$ 100 million\n"
+                    "Net cash generated from operating activities FY2024 HK$ 80 million\n"
+                    "Capital expenditure FY2024 HK$ 30 million\n"
+                    "Risk: competition remains intense"
+                ),
+            }, db_path=f"{directory}/research.sqlite3")
+            self.assertTrue(any(item["calculation_type"] == "dcf" for item in report["calculations"]))
+            original_base = next(item for item in report["calculations"] if item["calculation_type"] == "dcf" and item["inputs"]["scenario"] == "base")
+
+            updated = recalculate_report(
+                report["report_id"],
+                {"growth_rates": [0.08, 0.06], "discount_rate": 0.15, "terminal_growth": 0.02, "shares": 9_000_000_000},
+                db_path=f"{directory}/research.sqlite3",
+            )
+            self.assertNotEqual(updated["report_id"], report["report_id"])
+            self.assertEqual(updated["recalculated_from"], report["report_id"])
+            self.assertEqual(updated["version"], 2)
+            self.assertEqual(len(updated["facts"]), len(report["facts"]))
+            self.assertEqual(updated["llm_claims"], report["llm_claims"])
+            new_base = next(item for item in updated["calculations"] if item["calculation_type"] == "dcf" and item["inputs"]["scenario"] == "base")
+            self.assertEqual(new_base["inputs"]["discount_rate"], 0.15)
+            self.assertNotEqual(new_base["outputs"]["value_per_share"], original_base["outputs"]["value_per_share"])
+            self.assertEqual(updated["company"]["symbol"], "00700")
+            self.assertTrue(updated["markdown"])
+
+            reopened = SQLiteStore(f"{directory}/research.sqlite3")
+            try:
+                artifacts = reopened.load_run_artifacts(UUID(report["run_id"]))
+                self.assertEqual(len(artifacts["reports"]), 2)
+                self.assertEqual({row["version"] for row in artifacts["reports"]}, {1, 2})
+                event_types = [event.event_type for event in reopened.events_for_run(UUID(report["run_id"]))]
+                self.assertIn("report/recalculated", event_types)
+                messages = reopened.list_session_messages(UUID(report["session_id"]))
+                self.assertTrue(any(message["content"].get("report_id") == updated["report_id"] for message in messages))
+            finally:
+                reopened.close()
+
+            # The original report stays intact and loadable.
+            restored = history_payload(f"/api/reports/{report['report_id']}")
+            self.assertEqual(restored["report_id"], report["report_id"])
+
+    def test_recalculate_report_validates_assumptions(self) -> None:
+        with self.assertRaises(ValueError):
+            recalculate_report("00000000-0000-0000-0000-000000000000", {"unknown_key": 1.0})
+        with self.assertRaises(ValueError):
+            recalculate_report("00000000-0000-0000-0000-000000000000", {"growth_rates": "fast"})
+        with self.assertRaises(ValueError):
+            recalculate_report("00000000-0000-0000-0000-000000000000", {"discount_rate": "0.1"})
+
+    def test_update_flow_detects_new_documents_and_diffs(self) -> None:
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
+            clear=False,
+        ):
+            initial = run_research_payload({
+                "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
+                "document": "Revenue FY2024 HK$ 100 million\nNet income FY2024 HK$ 20 million",
+            }, db_path=f"{directory}/research.sqlite3")
+
+            # Same content again: nothing new to ingest.
+            with self.assertRaisesRegex(ValueError, "未检测到新资料"):
+                run_research_payload({
+                    "name": "腾讯", "symbol": "00700", "as_of_date": "2026-06-30", "question": "更新研究",
+                    "document": "Revenue FY2024 HK$ 100 million\nNet income FY2024 HK$ 20 million",
+                    "mode": "update",
+                }, db_path=f"{directory}/research.sqlite3", session_id=UUID(initial["session_id"]))
+
+            updated = run_update_payload({
+                "name": "腾讯", "symbol": "00700", "as_of_date": "2026-06-30", "question": "更新研究",
+                "document": "Revenue FY2025 HK$ 120 million\nNet income FY2025 HK$ 30 million\nRisk: regulatory pressure",
+            }, db_path=f"{directory}/research.sqlite3", session_id=UUID(initial["session_id"]))
+            self.assertEqual(updated["update_of"], initial["report_id"])
+            new_metrics = {(fact["metric"], fact.get("period_end")) for fact in updated["diff"]["new_facts"]}
+            self.assertIn(("revenue", "2025-12-31"), new_metrics)
+            self.assertIn(("net_income", "2025-12-31"), new_metrics)
+            self.assertEqual(updated["diff"]["changed_facts"], [])
+            self.assertIsNone(updated["diff"]["valuation"])
+            self.assertTrue(updated["diff"]["conclusion_changed"])
+            self.assertIn("与上一版差异", updated["markdown"])
+            run_detail = history_payload(f"/api/runs/{updated['run_id']}")
+            self.assertEqual(run_detail["run"]["run_type"], "update")
+
+            # The initial report is untouched.
+            self.assertNotIn("diff", history_payload(f"/api/reports/{initial['report_id']}"))
+
+    def test_update_requires_existing_research_history(self) -> None:
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(ValueError, "请先完成一次初始研究"):
+                run_update_payload({
+                    "name": "新公司", "symbol": "09999", "as_of_date": "2026-06-30", "question": "更新研究",
+                    "document": "Revenue FY2025 HK$ 10 million",
+                }, db_path=f"{directory}/research.sqlite3")
+
+    def test_chat_update_intent_runs_incremental_update(self) -> None:
+        contents = {"body": "<p>Revenue FY2024 HK$ 100 million</p>"}
+
+        class FakeFetcher:
+            def __init__(self, **_kwargs):
+                pass
+
+            def fetch(self, url: str) -> FetchedDocument:
+                return FetchedDocument(url, "text/html", contents["body"].encode("utf-8"), datetime.now(timezone.utc))
+
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
+            clear=False,
+        ):
+            chat_entry_payload({"name": "腾讯", "symbol": "00700", "content": "你好"}, db_path=f"{directory}/research.sqlite3")
+            add_company_source("00700", "HK", "https://ir.example.com/results.html")
+            with patch("stock_research.service.HttpDocumentFetcher", FakeFetcher):
+                initial = run_research_payload({
+                    "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
+                }, db_path=f"{directory}/research.sqlite3")
+            contents["body"] = "<p>Revenue FY2025 HK$ 120 million</p>"
+            with patch("stock_research.service.HttpDocumentFetcher", FakeFetcher):
+                result = chat_payload(UUID(initial["session_id"]), "更新研究", db_path=f"{directory}/research.sqlite3")
+            self.assertEqual(result["type"], "research_started")
+            self.assertTrue(result["report"]["diff"]["new_facts"])
+            self.assertEqual(result["report"]["update_of"], initial["report_id"])
 
     def test_repeated_symbol_reuses_project_but_creates_new_run(self) -> None:
         with TemporaryDirectory() as directory, patch.dict(

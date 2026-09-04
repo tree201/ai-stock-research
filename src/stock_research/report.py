@@ -21,6 +21,57 @@ def _citation(fact: FactCandidate, evidence_sources: dict[str, dict[str, Any]] |
     return citation
 
 
+def _fact_key(fact: dict[str, Any]) -> tuple[str, str | None]:
+    return (str(fact.get("metric", "")), fact.get("period_end"))
+
+
+def _base_value_per_share(report: dict[str, Any]) -> float | None:
+    for item in report.get("calculations", []):
+        if item.get("calculation_type") == "dcf" and item.get("inputs", {}).get("scenario") == "base":
+            return item.get("outputs", {}).get("value_per_share")
+    return None
+
+
+def diff_reports(previous: dict[str, Any], current: dict[str, Any]) -> dict[str, Any]:
+    """Compare an updated report against the report it refreshes.
+
+    Facts are keyed by metric and period; the base-scenario DCF value per
+    share stands in for the valuation.  Removed facts are intentionally not
+    reported: an update run only ingests new documents, so absent old facts
+    are expected rather than meaningful.
+    """
+    previous_facts = {_fact_key(fact): fact for fact in previous.get("facts", [])}
+    current_facts = {_fact_key(fact): fact for fact in current.get("facts", [])}
+    new_facts = [fact for key, fact in current_facts.items() if key not in previous_facts]
+    changed_facts = [
+        {
+            "metric": key[0],
+            "period_end": key[1],
+            "previous_value": previous_facts[key]["value"],
+            "current_value": fact["value"],
+        }
+        for key, fact in current_facts.items()
+        if key in previous_facts and abs(float(previous_facts[key]["value"]) - float(fact["value"])) > 1e-9
+    ]
+    valuation: dict[str, Any] | None = None
+    previous_vps = _base_value_per_share(previous)
+    current_vps = _base_value_per_share(current)
+    if previous_vps is not None and current_vps is not None and abs(previous_vps) > 1e-12:
+        valuation = {
+            "previous": previous_vps,
+            "current": current_vps,
+            "change_pct": (current_vps - previous_vps) / abs(previous_vps),
+        }
+    conclusion_changed = bool(new_facts or changed_facts or (valuation and abs(valuation["change_pct"]) > 0.01))
+    return {
+        "previous_report_id": previous.get("report_id"),
+        "new_facts": new_facts,
+        "changed_facts": changed_facts,
+        "valuation": valuation,
+        "conclusion_changed": conclusion_changed,
+    }
+
+
 class ReportBuilder:
     def build(
         self,
@@ -122,5 +173,26 @@ class ReportBuilder:
             for claim in report["llm_claims"]:
                 lines.append(f"- [{claim['category']}] {claim['text']}（置信度 {claim['confidence']:.2f}）")
             lines.append("")
-        lines.extend(["## 审计", "", f"状态：{report.get('review', {}).get('status', 'unknown')}", "", report["disclaimer"]])
+        diff = report.get("diff")
+        if diff:
+            lines.extend(["## 与上一版差异", ""])
+            new_facts = diff.get("new_facts", [])
+            if new_facts:
+                lines.append(f"- 新增事实 {len(new_facts)} 条：" + "、".join(f"{fact['metric']}（{fact.get('period_end') or '-'}）" for fact in new_facts))
+            else:
+                lines.append("- 无新增事实")
+            for change in diff.get("changed_facts", []):
+                lines.append(f"- {change['metric']}（{change.get('period_end') or '-'}）：{change['previous_value']:,.2f} → {change['current_value']:,.2f}")
+            valuation = diff.get("valuation")
+            if valuation:
+                lines.append(f"- 基准情景每股价值：{valuation['previous']:,.4f} → {valuation['current']:,.4f}（{valuation['change_pct']:+.1%}）")
+            lines.append(f"- 结论变化：{'是' if diff.get('conclusion_changed') else '否'}")
+            lines.append("")
+        lines.extend(["## 审计", "", f"状态：{report.get('review', {}).get('status', 'unknown')}"])
+        review = report.get("review", {})
+        for warning in review.get("warnings", []):
+            lines.append(f"- 警告：{warning}")
+        for issue in review.get("issues", []):
+            lines.append(f"- 问题：{issue}")
+        lines.extend(["", report["disclaimer"]])
         return "\n".join(lines)

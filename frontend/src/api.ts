@@ -7,7 +7,8 @@ export type RunStep = { step_key: string; order: number; status: string; attempt
 export type Run = { id: string; status: string; question: string; as_of_date: string; steps?: RunStep[] };
 export type SessionDetail = { session: Session; messages: Message[]; runs: Run[]; jobs?: Job[] };
 export type Job = { id: string; session_id: string; run_id?: string; status: "queued" | "running" | "completed" | "failed" | "canceled" | string; attempts: number; error?: { message?: string } };
-export type Report = { report_id: string; company: { name: string; symbol: string }; summary: string[]; markdown: string; facts: Fact[]; calculations: Calculation[] };
+export type Report = { report_id: string; company: { name: string; symbol: string }; summary: string[]; markdown: string; facts: Fact[]; calculations: Calculation[]; recalculated_from?: string; version?: number; diff?: ReportDiff; update_of?: string };
+export type ReportDiff = { previous_report_id?: string; new_facts?: Fact[]; changed_facts?: { metric: string; period_end?: string | null; previous_value: number; current_value: number }[]; valuation?: { previous: number; current: number; change_pct: number } | null; conclusion_changed?: boolean };
 export type Fact = { metric: string; value: number; currency?: string; period_end?: string; confidence: number; citation: { source_line: number; raw_text: string; page?: number; source_url?: string } };
 export type Calculation = { calculation_type: string; inputs: Record<string, unknown>; outputs: Record<string, number>; };
 
@@ -30,6 +31,7 @@ export const api = {
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
   run: (id: string) => request<{ artifacts: { reports: { id: string }[] } }>(`/api/runs/${id}`),
   report: (id: string) => request<Report>(`/api/reports/${id}`),
+  recalculateReport: (reportId: string, assumptions: Record<string, number | number[]>) => request<Report>(`/api/reports/${reportId}/recalculate`, { method: "POST", body: JSON.stringify({ dcf_assumptions: assumptions }) }),
   companyPanel: (symbol: string, market: string) => request<CompanyPanel>(`/api/company-panel?symbol=${encodeURIComponent(symbol)}&market=${encodeURIComponent(market)}`),
   addCompanySource: (symbol: string, market: string, url: string, title?: string) => request<CompanyPanel>(`/api/company-panel/sources`, { method: "POST", body: JSON.stringify({ symbol, market, url, title }) }),
   removeCompanySource: (sourceId: string) => request<{ ok: boolean }>(`/api/company-panel/sources/${sourceId}`, { method: "DELETE" }),

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import date
-from typing import Iterable
+from typing import Callable, Iterable
 from uuid import UUID, uuid4
 
 from .calculations import CalculationResult, cagr, dcf, free_cash_flow, net_cash, ratio
+from .context import ContextBuilder
 from .documents import DocumentIngestor, RawDocument
 from .facts import FactCandidate, FinancialFactExtractor
 from .report import ReportBuilder
@@ -15,12 +16,18 @@ from .workflow import ResearchWorkflow
 
 
 class ResearchPipeline:
-    def __init__(self, workflow: ResearchWorkflow | None = None, llm_provider: LLMProvider | None = None) -> None:
+    def __init__(
+        self,
+        workflow: ResearchWorkflow | None = None,
+        llm_provider: LLMProvider | None = None,
+        context_builder: ContextBuilder | None = None,
+    ) -> None:
         self.workflow = workflow or ResearchWorkflow()
         self.document_ingestor = DocumentIngestor()
         self.fact_extractor = FinancialFactExtractor()
         self.report_builder = ReportBuilder()
         self.llm_provider = llm_provider
+        self.context_builder = context_builder or ContextBuilder()
 
     def run(
         self,
@@ -31,8 +38,10 @@ class ResearchPipeline:
         as_of_date: date,
         documents: Iterable[RawDocument],
         dcf_assumptions: dict[str, float | list[float]] | None = None,
+        run_type: str = "initial",
+        report_transform: Callable[[dict], dict] | None = None,
     ) -> dict:
-        run = self.workflow.create_run(project_id, question, as_of_date, session_id=session_id)
+        run = self.workflow.create_run(project_id, question, as_of_date, run_type=run_type, session_id=session_id)
         self.workflow.plan(run.id)
         documents = [document for document in documents if not document.published_at or document.published_at.date() <= as_of_date]
         if not documents:
@@ -63,9 +72,14 @@ class ResearchPipeline:
 
         qualitative_signals = self._signals(chunks)
         llm_claims: list[dict] = []
+        llm_usage: dict | None = None
+        llm_evidence_count = 0
         if self.llm_provider:
-            evidence = tuple({"evidence_id": str(chunk.id), "text": chunk.text} for chunk in chunks)
+            selected_chunks = self.context_builder.select(chunks, question)
+            evidence = tuple({"evidence_id": str(chunk.id), "text": chunk.text} for chunk in selected_chunks)
+            llm_evidence_count = len(evidence)
             analysis = self.llm_provider.analyze(AnalysisRequest(question, as_of_date, evidence))
+            llm_usage = analysis.usage
             llm_claims = [
                 {"category": claim.category, "text": claim.text, "evidence_ids": list(claim.evidence_ids), "confidence": claim.confidence, "counter_evidence_ids": list(claim.counter_evidence_ids), "provider": analysis.provider, "model": analysis.model}
                 for claim in analysis.claims
@@ -73,7 +87,7 @@ class ResearchPipeline:
         if self.workflow.store:
             self.workflow.store.save_claims(run.id, llm_claims)
         self.workflow.start_next_step(run.id)
-        self.workflow.complete_step(run.id, "analyze_business", {"signal_count": len(qualitative_signals.get("business", [])), "llm_claim_count": len(llm_claims)})
+        self.workflow.complete_step(run.id, "analyze_business", {"signal_count": len(qualitative_signals.get("business", [])), "llm_claim_count": len(llm_claims), "llm_evidence_count": llm_evidence_count, "llm_evidence_total": len(chunks), "llm_usage": llm_usage})
 
         self.workflow.start_next_step(run.id)
         self.workflow.complete_step(run.id, "analyze_risks", {"signal_count": len(qualitative_signals.get("risks", [])), "llm_claim_count": len(llm_claims)})
@@ -86,7 +100,7 @@ class ResearchPipeline:
 
         self.workflow.start_next_step(run.id)
         review = self._review(facts, calculations, as_of_date)
-        if review["status"] != "passed":
+        if review["status"] == "needs_review":
             raise ValueError(f"research review failed: {review['issues']}")
         self.workflow.complete_step(run.id, "review", review)
 
@@ -108,15 +122,22 @@ class ResearchPipeline:
         report["report_id"] = str(uuid4())
         report["run_id"] = str(run.id)
         report["plan_version"] = run.plan_version
+        if report_transform is not None:
+            report = report_transform(report)
         if self.workflow.store:
             self.workflow.store.save_report(run.id, report, UUID(report["report_id"]))
         return report
 
     @staticmethod
     def _calculate(facts: list[FactCandidate], assumptions: dict[str, float | list[float]] | None) -> list[CalculationResult]:
+        # Low-confidence facts are excluded; among the remaining facts the
+        # latest reported period wins, matching the report summary logic.
         by_metric: dict[str, FactCandidate] = {}
         for fact in facts:
-            if fact.confidence >= 0.8 and fact.metric not in by_metric:
+            if fact.confidence < 0.8:
+                continue
+            previous = by_metric.get(fact.metric)
+            if previous is None or (fact.period_end or date.min) > (previous.period_end or date.min):
                 by_metric[fact.metric] = fact
         calculations: list[CalculationResult] = []
         revenue = by_metric.get("revenue")
@@ -172,13 +193,22 @@ class ResearchPipeline:
     @staticmethod
     def _review(facts: list[FactCandidate], calculations: list[CalculationResult], as_of_date: date) -> dict:
         issues: list[str] = []
+        warnings: list[str] = []
         if not facts:
             issues.append("没有抽取到财务事实")
         if any(fact.period_end and fact.period_end > as_of_date for fact in facts):
             issues.append("事实期间晚于研究截止日期")
-        if any(fact.confidence < 0.8 for fact in facts):
-            issues.append("存在低置信度事实")
+        low_confidence = [fact for fact in facts if fact.confidence < 0.8]
+        if low_confidence:
+            metrics = ", ".join(sorted({fact.metric for fact in low_confidence}))
+            warnings.append(f"{len(low_confidence)} 条低置信度事实未参与计算（{metrics}）")
         for calculation in calculations:
             if not calculation.outputs:
                 issues.append(f"计算无输出: {calculation.calculation_type}")
-        return {"status": "passed" if not issues else "needs_review", "issues": issues, "fact_count": len(facts), "calculation_count": len(calculations)}
+        if issues:
+            status = "needs_review"
+        elif warnings:
+            status = "passed_with_warnings"
+        else:
+            status = "passed"
+        return {"status": status, "issues": issues, "warnings": warnings, "fact_count": len(facts), "calculation_count": len(calculations)}

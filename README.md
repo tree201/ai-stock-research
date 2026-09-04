@@ -57,6 +57,8 @@ Yahoo Finance 适配器只用于原型验证，不能作为生产环境的唯一
 
 联网搜索：追问消息中包含 `搜`/`联网`/`网络`/`最新`/`最近`/`新闻`/`资讯`/`消息`/`公告`/`股价`/`行情`/`价格` 等词时，系统会先查 DuckDuckGo（经系统 `curl` 请求，因其对 Python TLS 指纹反爬），无结果时降级到 Google News RSS（官方免费源，优先使用用户原话作为查询词）；两者都无结果时回退到基于历史报告的回答。搜索命中时回答末尾附 Markdown 来源链接，前端在新标签页打开。整条链路免费且无需额外 API Key，搜索失败不影响正常问答。
 
+增量更新：会话消息包含「更新」（如“更新研究”“更新这家公司”）时进入增量模式。系统按内容哈希对比该公司历史 run 已摄取的全部文档，只把未见过的新文档交给新的 `update` 类型研究运行，并把新报告与最近一份报告做差异对比（新增事实、数值变化、基准情景每股价值变化、结论是否变化）。差异附加在新报告的 `diff` 字段和 Markdown「与上一版差异」小节中，前端报告弹层展示结构化差异列表。没有新资料时明确报错提示先登记新链接，不会静默生成重复报告。RQ 后台队列同样支持（mode 随 payload 持久化）。
+
 公司档案面板：顶栏「公司档案」按钮可展开右侧面板，默认收起；新报告生成时按钮显示红点提示而不自动弹开。面板含四个 Tab——「概览」展示 Yahoo 延迟行情快照（现价、涨跌、52 周区间，原型数据仅供参考）与公司资料/报告计数；「资料」是参考资料管理：登记的资料源 URL 持久化在数据库中并绑定公司（`company_sources` 表），每次研究自动抓取全部已登记 URL，抓取成功的文档进入「已归档文档」列表，登记/移除即时生效；「报告」列出历史报告，点开在弹层中查看全文；「动态」按需加载 Google News 相关新闻。研究截止日期不再由前端传入，默认取当天。配套 API：`GET /api/company-panel?symbol=&market=`、`POST /api/company-panel/sources`、`DELETE /api/company-panel/sources/{id}`、`GET /api/quote/{symbol}?market=`、`GET /api/news?name=&symbol=`。
 
 Web API：
@@ -74,13 +76,14 @@ Web API：
 - `GET /api/runs`：列出运行，可用 `?project_id=...` 过滤；
 - `GET /api/runs/{run_id}`：返回状态、步骤、事件及所有中间产物；
 - `GET /api/reports/{report_id}`：读取完整报告 JSON/Markdown。
+- `POST /api/reports/{report_id}/recalculate`：基于既有报告的事实局部重算估值并生成新报告版本（复用 facts/定性结论，仅重跑代码计算，不调用模型、不重新抓取文档）；请求体为 `{"dcf_assumptions": {...}}`，支持 `growth_rates`、`discount_rate`、`terminal_growth`、`shares`、`base_fcf`、`net_cash`、`revenue_prior`、`revenue_years`。
 - `GET/POST /api/settings`：读取或配置当前本地服务的模型 Provider（不会返回 API Key）。
 
 `POST /api/chat` 和 `POST /api/research` 支持 `document_urls`（URL 数组或换行分隔字符串），也支持 `document_sources`（包含 `url`、可选 `title`、`published_at` 和 `language` 的对象数组）。默认只允许 HKEX 的 `www1.hkexnews.hk`、`www.hkexnews.hk` 和 `hkexnews.hk`；如需公司 IR 域名，可通过 `AI_STOCK_DOCUMENT_HOSTS=ir.example.com,www1.hkexnews.hk` 显式加入白名单。
 
 前端源码位于 [`frontend/`](./frontend/)，开发模式访问 `http://127.0.0.1:5173`；Python Web 服务检测到 `frontend/dist` 后会自动托管构建后的页面。
 
-LLM 接口使用 OpenAI-compatible wire shape。配置 `DEEPSEEK_API_KEY` 后运行 `--llm` 即可使用 DeepSeek `deepseek-chat`；也可以通过 `AI_STOCK_LLM_BASE_URL` 和 `AI_STOCK_LLM_MODEL` 接入其他兼容网关。API Key 只从环境变量读取，不写入代码或仓库。CLI 和 Web 研究请求都要求真实模型，未配置时会直接提示“未配置真实模型”，不会降级到本地规则模式。
+LLM 接口使用 OpenAI-compatible wire shape。配置 `DEEPSEEK_API_KEY` 后运行 `--llm` 即可使用 DeepSeek `deepseek-chat`；也可以通过 `AI_STOCK_LLM_BASE_URL` 和 `AI_STOCK_LLM_MODEL` 接入其他兼容网关。API Key 只从环境变量读取，不写入代码或仓库。CLI 和 Web 研究请求都要求真实模型，未配置时会直接提示“未配置真实模型”，不会降级到本地规则模式。模型分析前会先做证据预算（Context Builder）：按研究问题相关性和财务信号对切片排序，在字符预算（默认 48k，`ResearchPipeline(context_builder=...)` 可调）内选择后再进入模型，避免真实年报撑爆上下文；调用用量（prompt/completion tokens、耗时、prompt 版本）记录在运行事件里。
 
 Web 页面左下角“设置”也可以配置 DeepSeek 或其他 OpenAI 兼容模型（接口地址、模型名和 API Key）。保存后新的研究请求会直接使用该模型；API Key 不会通过状态接口返回。生产环境建议继续使用环境变量注入密钥，并保护本地数据库与队列存储。
 

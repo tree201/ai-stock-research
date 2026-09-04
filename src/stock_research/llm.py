@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import date
 import json
 import os
+import time
 from typing import Any, Callable, Iterable, Protocol
 from urllib.request import Request, urlopen
 
@@ -43,6 +44,7 @@ class AnalysisResponse:
     claims: tuple[AnalysisClaim, ...]
     provider: str
     model: str
+    usage: dict[str, Any] | None = None
 
 
 class LLMProvider(Protocol):
@@ -77,6 +79,7 @@ class OpenAICompatibleProvider:
     """
 
     provider_name = "openai_compatible"
+    prompt_version = "analyze-v1"
 
     def __init__(
         self,
@@ -113,6 +116,7 @@ class OpenAICompatibleProvider:
             ],
             "response_format": {"type": "json_object"},
         }
+        started = time.monotonic()
         req = Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
@@ -130,7 +134,16 @@ class OpenAICompatibleProvider:
             claims = tuple(self._parse_claim(item, request.evidence) for item in decoded["claims"])
         except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise LLMError(f"LLM returned invalid analysis JSON: {exc}") from exc
-        return AnalysisResponse(claims, self.provider_name, self.model)
+        usage_raw = body.get("usage") if isinstance(body, dict) else None
+        usage = {
+            "prompt_version": self.prompt_version,
+            "provider": self.provider_name,
+            "model": self.model,
+            "prompt_tokens": int(usage_raw.get("prompt_tokens", 0)) if isinstance(usage_raw, dict) else 0,
+            "completion_tokens": int(usage_raw.get("completion_tokens", 0)) if isinstance(usage_raw, dict) else 0,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+        }
+        return AnalysisResponse(claims, self.provider_name, self.model, usage)
 
     def answer(self, question: str, context: str = "") -> str:
         """Answer a follow-up question using previously verified report context."""

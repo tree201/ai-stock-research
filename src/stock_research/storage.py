@@ -480,6 +480,7 @@ class SQLiteStore:
         payload = dict(report)
         payload["report_id"] = str(report_id)
         payload["run_id"] = str(run_id)
+        payload["version"] = version
         self.connection.execute(
             "INSERT INTO reports (id,run_id,version,payload_json,markdown,created_at) VALUES (?,?,?,?,?,?)",
             (str(report_id), str(run_id), version, _json(payload), str(payload.get("markdown", "")), _dt(datetime.now(timezone.utc))),
@@ -561,6 +562,18 @@ class SQLiteStore:
             (str(company_id),),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def list_seen_content_hashes(self, company_id: UUID) -> set[str]:
+        """Content hashes of documents already ingested by any run of this company."""
+        rows = self.connection.execute(
+            """SELECT DISTINCT d.content_hash FROM documents d
+               JOIN run_documents rd ON rd.document_id=d.id
+               JOIN runs r ON r.id=rd.run_id
+               JOIN projects p ON p.id=r.project_id
+               WHERE p.company_id=?""",
+            (str(company_id),),
+        ).fetchall()
+        return {row["content_hash"] for row in rows}
 
     def add_company_source(self, company_id: UUID, url: str, title: str | None = None) -> dict[str, Any]:
         existing = self.connection.execute(

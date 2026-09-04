@@ -68,7 +68,125 @@ function MessageBubble({ message }: { message: Message }) {
   );
 }
 
-function ReportCard({ report }: { report: Report }) {
+function AssumptionsForm({
+  report,
+  onUpdated,
+}: {
+  report: Report;
+  onUpdated?: (report: Report) => void;
+}) {
+  const dcf =
+    report.calculations?.filter((item) => item.calculation_type === "dcf") ||
+    [];
+  const base =
+    dcf.find((item) => item.inputs.scenario === "base") || dcf[0];
+  const [growth, setGrowth] = useState(() =>
+    Array.isArray(base?.inputs.growth_rates)
+      ? (base.inputs.growth_rates as number[]).join(", ")
+      : "",
+  );
+  const [discount, setDiscount] = useState(() =>
+    base?.inputs.discount_rate != null ? String(base.inputs.discount_rate) : "",
+  );
+  const [terminal, setTerminal] = useState(() =>
+    base?.inputs.terminal_growth != null
+      ? String(base.inputs.terminal_growth)
+      : "",
+  );
+  const [shares, setShares] = useState(() =>
+    base?.inputs.shares != null ? String(base.inputs.shares) : "",
+  );
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    const growthRates = growth
+      .split(/[,，]/)
+      .map((item) => Number(item.trim()))
+      .filter((item) => Number.isFinite(item) && item !== 0);
+    const discountRate = Number(discount.trim());
+    const terminalGrowth = Number(terminal.trim());
+    if (!growthRates.length || !Number.isFinite(discountRate)) {
+      setError("请填写有效的增长率和折现率（小数形式，如 0.12）");
+      return;
+    }
+    const assumptions: Record<string, number | number[]> = {
+      growth_rates: growthRates,
+      discount_rate: discountRate,
+    };
+    if (Number.isFinite(terminalGrowth))
+      assumptions.terminal_growth = terminalGrowth;
+    const shareCount = Number(shares.trim());
+    if (Number.isFinite(shareCount) && shareCount > 0)
+      assumptions.shares = shareCount;
+    setBusy(true);
+    setError("");
+    try {
+      const updated = await api.recalculateReport(report.report_id, assumptions);
+      onUpdated?.(updated);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "重算失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="assumption-form">
+      <div className="assumption-title">修改估值假设并重算（无需重新研究）</div>
+      <div className="assumption-grid">
+        <label>
+          增长率（逗号分隔）
+          <input
+            value={growth}
+            onChange={(e) => setGrowth(e.target.value)}
+            placeholder="0.12, 0.10, 0.08"
+          />
+        </label>
+        <label>
+          折现率
+          <input
+            value={discount}
+            onChange={(e) => setDiscount(e.target.value)}
+            placeholder="0.09"
+          />
+        </label>
+        <label>
+          永续增长率
+          <input
+            value={terminal}
+            onChange={(e) => setTerminal(e.target.value)}
+            placeholder="0.03"
+          />
+        </label>
+        <label>
+          股本
+          <input
+            value={shares}
+            onChange={(e) => setShares(e.target.value)}
+            placeholder="9000000000"
+          />
+        </label>
+      </div>
+      {error && <div className="assumption-error">{error}</div>}
+      <button
+        className="assumption-submit"
+        disabled={busy}
+        onClick={() => void submit()}
+      >
+        {busy ? "重算中…" : "重算估值"}
+      </button>
+    </div>
+  );
+}
+
+function ReportCard({
+  report,
+  onUpdated,
+}: {
+  report: Report;
+  onUpdated?: (report: Report) => void;
+}) {
   const facts = useMemo(() => report.facts?.slice(0, 8) || [], [report]);
   const dcf =
     report.calculations?.filter((item) => item.calculation_type === "dcf") ||
@@ -80,6 +198,57 @@ function ReportCard({ report }: { report: Report }) {
         <span>研究报告</span>
         <span className="muted">{report.company.symbol}</span>
       </div>
+      {report.recalculated_from && (
+        <div className="recalc-note">
+          已按新假设重算（版本 {report.version || "-"}）
+        </div>
+      )}
+      {report.diff && (
+        <details className="diff-details" open>
+          <summary>与上一版差异</summary>
+          <div className="diff-list">
+            {(report.diff.new_facts?.length ?? 0) > 0 ? (
+              report.diff.new_facts!.map((fact, index) => (
+                <div className="diff-row" key={`new-${fact.metric}-${fact.period_end}-${index}`}>
+                  <span className="diff-tag new">新增</span>
+                  <span>
+                    {fact.metric}（{fact.period_end || "-"}）＝{" "}
+                    {fact.value.toLocaleString()} {fact.currency || ""}
+                  </span>
+                </div>
+              ))
+            ) : (
+              <div className="diff-row">无新增事实</div>
+            )}
+            {(report.diff.changed_facts || []).map((change) => (
+              <div
+                className="diff-row"
+                key={`chg-${change.metric}-${change.period_end}`}
+              >
+                <span className="diff-tag changed">变化</span>
+                <span>
+                  {change.metric}（{change.period_end || "-"}）：
+                  {change.previous_value.toLocaleString()} →{" "}
+                  {change.current_value.toLocaleString()}
+                </span>
+              </div>
+            ))}
+            {report.diff.valuation && (
+              <div className="diff-row">
+                <span className="diff-tag valuation">估值</span>
+                <span>
+                  基准情景每股价值 {report.diff.valuation.previous.toLocaleString()} →{" "}
+                  {report.diff.valuation.current.toLocaleString()}（
+                  {(report.diff.valuation.change_pct * 100).toFixed(1)}%）
+                </span>
+              </div>
+            )}
+            <div className="diff-row muted">
+              结论变化：{report.diff.conclusion_changed ? "是" : "否"}
+            </div>
+          </div>
+        </details>
+      )}
       <div className="summary-list">
         {report.summary?.map((item) => (
           <div key={item}>{item}</div>
@@ -142,6 +311,7 @@ function ReportCard({ report }: { report: Report }) {
               </div>
             ))}
           </div>
+          <AssumptionsForm report={report} onUpdated={onUpdated} />
         </details>
       )}
       <details>
@@ -1260,7 +1430,13 @@ export default function App() {
         width={880}
         title={reportViewer ? `${reportViewer.company.name} 研究报告` : "研究报告"}
       >
-        {reportViewer && <ReportCard report={reportViewer} />}
+        {reportViewer && (
+          <ReportCard
+            key={reportViewer.report_id}
+            report={reportViewer}
+            onUpdated={setReportViewer}
+          />
+        )}
       </Modal>
       <Modal
         open={!!articleViewer}

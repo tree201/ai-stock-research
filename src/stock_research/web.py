@@ -172,7 +172,7 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-        if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/projects"} and not self.path.startswith(("/api/projects/", "/api/sessions/", "/api/company-panel")):
+        if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/projects"} and not self.path.startswith(("/api/projects/", "/api/sessions/", "/api/company-panel", "/api/reports/")):
             self._send(404, b'{"error":"not found"}', "application/json")
             return
         try:
@@ -195,6 +195,9 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
                 response = set_session_status(UUID(self.path.split("/")[3]), "active")
             elif self.path == "/api/research":
                 response = run_research_payload(payload)
+            elif self.path.startswith("/api/reports/") and self.path.endswith("/recalculate"):
+                report_id = self.path.removeprefix("/api/reports/").removesuffix("/recalculate")
+                response = recalculate_report(report_id, payload.get("dcf_assumptions") if isinstance(payload, dict) else None)
             elif self.path == "/api/company-panel/sources":
                 symbol = str(payload.get("symbol", "")).strip()
                 market = str(payload.get("market", "HK")).strip().upper() or "HK"

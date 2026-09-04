@@ -26,6 +26,12 @@ export const CSS_THEME_TOKENS: Record<ThemeName, Record<string, string>> = {
     "rail-text-muted": "#75807b",
     "bubble-user": "#e9efec",
     "bubble-user-line": "#d9e3de",
+    "tag-private-bg": "#f0eafc",
+    "tag-private-ink": "#6941c6",
+    "tag-ok-bg": "#e8f7f2",
+    "tag-ok-ink": "#216e5a",
+    "tag-warn-bg": "#fff4e5",
+    "tag-warn-ink": "#b25e09",
   },
   dark: {
     "paper": "#101312",
@@ -49,6 +55,12 @@ export const CSS_THEME_TOKENS: Record<ThemeName, Record<string, string>> = {
     "rail-text-muted": "#8d9b95",
     "bubble-user": "#242b28",
     "bubble-user-line": "#33403a",
+    "tag-private-bg": "#2b2542",
+    "tag-private-ink": "#c6b5f2",
+    "tag-ok-bg": "#1d2b26",
+    "tag-ok-ink": "#5ecfa9",
+    "tag-warn-bg": "#332a1c",
+    "tag-warn-ink": "#e2a75e",
   },
 };
 

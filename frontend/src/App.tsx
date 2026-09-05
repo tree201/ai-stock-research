@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { App as AntdApp, Button, Badge, ConfigProvider, Dropdown, Modal, Select, Tabs, theme as antdTheme } from "antd";
+import { App as AntdApp, Button, Badge, ConfigProvider, Dropdown, Modal, Segmented, Select, Tabs, theme as antdTheme } from "antd";
 import { ANTD_THEME_TOKENS, ThemeName, applyTheme, initialTheme } from "./theme";
 import { ApprovalPicker } from "./ApprovalPicker";
 import ReactMarkdown from "react-markdown";
@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import {
   api,
+  fmtName,
   ArticleReader,
   Company,
   CompanyCatalogEntry,
@@ -41,6 +42,7 @@ import {
   Job,
   Message,
   ModelSettings,
+  NameDisplayPref,
   NewsItem,
   Quote,
   Report,
@@ -652,6 +654,7 @@ export default function App() {
     api_key: "",
   });
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
+  const [namePref, setNamePref] = useState<NameDisplayPref>("zh");
   const [llmConfig, setLlmConfig] = useState<LlmConfig | null>(null);
   const submittingRef = useRef(false);
   const [newResearchOpen, setNewResearchOpen] = useState(false);
@@ -750,17 +753,28 @@ export default function App() {
       .finally(() => { setCompanyCatalogLoading(false); setCompanyCatalogLoaded(true); });
   }, [newResearchOpen, companyCatalogLoaded, companyCatalogLoading]);
 
+  // 公司名统一显示：viewCompanies 的 name 已按全局偏好替换（原始英文名保留在 name_en 供搜索/创建回退）
+  const viewCompanies = useMemo(
+    () =>
+      companies.map((company) => ({
+        ...company,
+        name_en: company.name,
+        name: fmtName(company, namePref),
+      })),
+    [companies, namePref],
+  );
+
   const researchCompanyOptions = useMemo(() => {
     const options = new Map<string, { value: string; label: string }>();
-    [...companyCatalog, ...companies].forEach((company) => {
+    [...companyCatalog, ...viewCompanies].forEach((company) => {
       const key = `${company.market}:${company.symbol}`;
       options.set(key, {
         value: key,
-        label: `${company.name}（${company.symbol} · ${company.market}）`,
+        label: `${fmtName(company, namePref)}（${company.symbol} · ${company.market}）`,
       });
     });
     return [...options.values()];
-  }, [companies, companyCatalog]);
+  }, [viewCompanies, companyCatalog, namePref]);
 
   async function createNewResearch() {
     if (newResearchBusy) return;
@@ -810,7 +824,8 @@ export default function App() {
     refreshCompanies();
     api
       .settings()
-      .then((status) =>
+      .then((status) => {
+        setNamePref(status.company_name_display || "zh");
         setModelSettings((current) => ({
           ...current,
           api_key_configured: status.api_key_configured,
@@ -824,18 +839,18 @@ export default function App() {
                 model: status.model || current.model,
               }
             : {}),
-        })),
-      )
+        }));
+      })
       .catch(() => undefined);
   }, []);
   const visibleCompanies = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
-    if (!query) return companies;
-    return companies.filter((company) => {
+    if (!query) return viewCompanies;
+    return viewCompanies.filter((company) => {
       const key = `${company.market}:${company.symbol}`;
       const sessions = companySessions[key] || [];
       return (
-        [company.name, company.symbol, company.market].some((value) =>
+        [company.name, company.name_en, company.name_zh || "", company.symbol, company.market].some((value) =>
           value.toLowerCase().includes(query),
         ) ||
         sessions.some((session) =>
@@ -845,7 +860,7 @@ export default function App() {
         )
       );
     });
-  }, [companies, companySessions, searchQuery]);
+  }, [viewCompanies, companySessions, searchQuery]);
 
   useEffect(() => {
     if (!searchOpen) { setSearchResults([]); return; }
@@ -855,13 +870,13 @@ export default function App() {
       if (query) {
         api.search(query).then(results => { if (!cancelled) setSearchResults(results); }).catch(() => { if (!cancelled) setSearchResults([]); });
       } else {
-        Promise.all(companies.flatMap(company => (company.project_ids?.length ? company.project_ids : [company.id]).map(projectId => api.sessions(projectId).then(sessions => sessions.map(session => ({ session, company: { id: company.id, name: company.name, symbol: company.symbol, market: company.market } }))))))
+        Promise.all(viewCompanies.flatMap(company => (company.project_ids?.length ? company.project_ids : [company.id]).map(projectId => api.sessions(projectId).then(sessions => sessions.map(session => ({ session, company: { id: company.id, name: company.name, name_zh: company.name_zh, symbol: company.symbol, market: company.market } }))))))
           .then(groups => { if (!cancelled) setSearchResults(groups.flat().sort((a, b) => new Date(b.session.latest_event_at).getTime() - new Date(a.session.latest_event_at).getTime()).slice(0, 20)); })
           .catch(() => { if (!cancelled) setSearchResults([]); });
       }
     }, 180);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [searchOpen, searchQuery, companies]);
+  }, [searchOpen, searchQuery, viewCompanies]);
 
   useEffect(() => {
     if (!panelOpen || !panelCompany) return;
@@ -1511,7 +1526,7 @@ export default function App() {
           <aside className="company-panel">
           <div className="report-panel-heading">
             <div>
-              <strong>{panelCompany?.name || companyName || "公司详情"}</strong>
+              <strong>{panelCompany ? fmtName(panelCompany, namePref) : companyName || "公司详情"}</strong>
               <small>
                 {panelCompany
                   ? `${panelCompany.symbol} · ${panelCompany.market}`
@@ -1868,7 +1883,7 @@ export default function App() {
         onCancel={() => setReportViewer(null)}
         footer={null}
         width={880}
-        title={reportViewer ? `${reportViewer.company.name} 研究报告` : "研究报告"}
+        title={reportViewer ? `${(viewCompanies.find(item => item.symbol === reportViewer.company.symbol && item.market === (reportViewer.company as { market?: string }).market)?.name) || reportViewer.company.name} 研究报告` : "研究报告"}
       >
         {reportViewer && (
           <ReportCard
@@ -1916,12 +1931,12 @@ export default function App() {
       {searchOpen && (
         <div className="search-overlay" role="dialog" aria-modal="true" aria-label="搜索会话" onMouseDown={() => setSearchOpen(false)}>
           <div className="search-dialog" onMouseDown={event => event.stopPropagation()}>
-            <div className="search-dialog-input"><Search size={20} /><input autoFocus value={searchQuery} onChange={event => setSearchQuery(event.target.value)} onKeyDown={event => { if (event.key === "Escape") setSearchOpen(false); if (event.key === "Enter" && searchResults[0]) { const result = searchResults[0]; const company = companies.find(item => item.symbol === result.company.symbol && item.market === result.company.market); setSearchOpen(false); if (company) void openSession(result.session, result.company.name, `${result.company.market}:${result.company.symbol}`); } }} placeholder="搜索会话内容、标题…" /></div>
+            <div className="search-dialog-input"><Search size={20} /><input autoFocus value={searchQuery} onChange={event => setSearchQuery(event.target.value)} onKeyDown={event => { if (event.key === "Escape") setSearchOpen(false); if (event.key === "Enter" && searchResults[0]) { const result = searchResults[0]; const company = companies.find(item => item.symbol === result.company.symbol && item.market === result.company.market); setSearchOpen(false); if (company) void openSession(result.session, fmtName(result.company, namePref), `${result.company.market}:${result.company.symbol}`); } }} placeholder="搜索会话内容、标题…" /></div>
             <div className="search-dialog-body">
               <div className="search-dialog-label">{searchQuery.trim() ? "搜索结果" : "最近会话"}</div>
               {searchResults.length ? searchResults.map(result => {
                 const company = companies.find(item => item.symbol === result.company.symbol && item.market === result.company.market);
-                return <button className="search-dialog-result" key={result.session.id} onClick={() => { setSearchOpen(false); if (company) void openSession(result.session, result.company.name, `${result.company.market}:${result.company.symbol}`); }}><MessageSquare size={16} /><span className="search-dialog-result-copy"><strong>{result.session.title || "新研究"}</strong><small>{result.company.name} · {result.company.symbol}{result.session.last_event_preview ? ` · ${result.session.last_event_preview}` : ""}</small></span><span className="search-dialog-result-key">↵</span></button>;
+                return <button className="search-dialog-result" key={result.session.id} onClick={() => { setSearchOpen(false); if (company) void openSession(result.session, fmtName(result.company, namePref), `${result.company.market}:${result.company.symbol}`); }}><MessageSquare size={16} /><span className="search-dialog-result-copy"><strong>{result.session.title || "新研究"}</strong><small>{fmtName(result.company, namePref)} · {result.company.symbol}{result.session.last_event_preview ? ` · ${result.session.last_event_preview}` : ""}</small></span><span className="search-dialog-result-key">↵</span></button>;
               }) : <div className="search-dialog-empty">{searchQuery.trim() ? "未找到匹配的会话" : "正在加载最近会话…"}</div>}
             </div>
             <div className="search-dialog-footer"><span><kbd>↑</kbd><kbd>↓</kbd> 移动</span><span><kbd>Enter</kbd> 打开</span><span><kbd>Esc</kbd> 关闭</span></div>
@@ -1996,7 +2011,7 @@ export default function App() {
                 <>
                   <header className="settings-section-head">
                     <h3>外观</h3>
-                    <p>切换亮色与暗色皮肤，立即生效并记住选择。</p>
+                    <p>切换亮色与暗色皮肤，调整公司名称显示；立即生效并记住选择。</p>
                   </header>
                   <div className="settings-card appearance-card">
                     <div className="appearance-options">
@@ -2016,6 +2031,31 @@ export default function App() {
                         <span className="appearance-swatch appearance-swatch-dark" />
                         <span>暗色</span>
                       </button>
+                    </div>
+                  </div>
+                  <div className="settings-card display-pref-card">
+                    <div className="display-pref-row">
+                      <div className="display-pref-copy">
+                        <strong>公司名称显示</strong>
+                        <small>侧栏、报告标题与新研究下拉统一生效；中文名来自 HKEX 官方名录，缺失时回退英文名。</small>
+                      </div>
+                      <Segmented
+                        value={namePref}
+                        onChange={(value) => {
+                          const next = value as NameDisplayPref;
+                          const previous = namePref;
+                          setNamePref(next);
+                          api.setDisplayNamePref(next).catch(() => {
+                            setNamePref(previous);
+                            setError("显示偏好保存失败");
+                          });
+                        }}
+                        options={[
+                          { label: "中文名优先", value: "zh" },
+                          { label: "英文名优先", value: "en" },
+                          { label: "双语", value: "bilingual" },
+                        ]}
+                      />
                     </div>
                   </div>
                 </>

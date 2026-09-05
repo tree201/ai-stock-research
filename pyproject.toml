@@ -7,6 +7,9 @@ name = "stock-research-agent"
 version = "0.1.0"
 description = "A verifiable long-running stock research agent"
 requires-python = ">=3.11"
+dependencies = [
+  "zhconv>=1.4.3",
+]
 
 [project.optional-dependencies]
 worker = [

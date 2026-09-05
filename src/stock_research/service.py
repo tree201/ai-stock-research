@@ -28,7 +28,7 @@ from .storage import SQLiteStore
 from .trust import DEFAULT_TRUSTED_HOSTS, classify_document, host_in_set
 from .workflow import ResearchWorkflow
 from .jobs import create_and_enqueue
-from .hk_companies import list_hk_companies
+from .hk_companies import list_hk_companies, list_hk_company_names_zh
 from .web_search import DuckDuckGoSearch, GoogleNewsSearch
 from .market_data import MarketDataError, YahooFinanceProvider
 
@@ -87,10 +87,64 @@ def stored_llm_selection() -> dict[str, Any] | None:
 
 
 def provider_status() -> dict[str, Any]:
+    display = company_name_display()
     provider = provider_from_env()
     if provider is None:
-        return {"llm_enabled": False, "provider": "", "model": "", "base_url": "", "api_key_configured": False}
-    return {"llm_enabled": True, "provider": getattr(provider, "provider_name", "configured"), "model": getattr(provider, "model", getattr(provider, "model_name", "unknown")), "base_url": getattr(provider, "base_url", ""), "api_key_configured": True}
+        return {"llm_enabled": False, "provider": "", "model": "", "base_url": "", "api_key_configured": False, "company_name_display": display}
+    return {"llm_enabled": True, "provider": getattr(provider, "provider_name", "configured"), "model": getattr(provider, "model", getattr(provider, "model_name", "unknown")), "base_url": getattr(provider, "base_url", ""), "api_key_configured": True, "company_name_display": display}
+
+
+# 公司名称全局显示偏好：zh 中文名优先 / en 英文名优先 / bilingual 双语
+DISPLAY_MODES = ("zh", "en", "bilingual")
+DEFAULT_DISPLAY_MODE = "zh"
+DISPLAY_SETTING_KEY = "company.display"
+
+
+def company_name_display() -> str:
+    store = SQLiteStore(database_path())
+    try:
+        value = store.get_setting(DISPLAY_SETTING_KEY)
+    finally:
+        store.close()
+    return value if value in DISPLAY_MODES else DEFAULT_DISPLAY_MODE
+
+
+def set_display_preference_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    mode = str(payload.get("display", payload.get("mode", ""))).strip()
+    if mode not in DISPLAY_MODES:
+        raise ValueError(f"未知显示偏好：{mode or '<missing>'}")
+    store = SQLiteStore(database_path())
+    try:
+        store.set_setting(DISPLAY_SETTING_KEY, mode)
+    finally:
+        store.close()
+    return {"ok": True, "company_name_display": mode}
+
+
+def hk_zh_name(symbol: str, market: str = "HK") -> str | None:
+    """按 symbol 从 HKEX 官方中文目录查简体中文名；best-effort。"""
+    if market.upper() != "HK":
+        return None
+    digits = "".join(ch for ch in symbol if ch.isdigit())
+    if not digits:
+        return None
+    try:
+        return list_hk_company_names_zh().get(digits.zfill(5))
+    except OSError:
+        return None
+
+
+def backfill_company_names() -> int:
+    """启动时为缺失中文名的公司按官方目录回填；网络失败静默跳过。"""
+    try:
+        mapping = list_hk_company_names_zh()
+    except OSError:
+        return 0
+    store = SQLiteStore(database_path())
+    try:
+        return store.backfill_name_zh(mapping)
+    finally:
+        store.close()
 
 
 def configure_provider(payload: dict[str, Any]) -> dict[str, Any]:
@@ -644,10 +698,13 @@ def create_project_with_session(payload: dict[str, Any]) -> dict[str, Any]:
     store = SQLiteStore(database_path())
     try:
         project = store.find_project(symbol, market) or ResearchProject(user_id=uuid4(), company_id=uuid4(), symbol=symbol, name=name, market=market)
-        project.name = name; project.updated_at = utc_now(); store.save_project(project)
+        project.name = name
+        if not project.name_zh:
+            project.name_zh = hk_zh_name(symbol, market)  # best-effort 附带官方简体中文名
+        project.updated_at = utc_now(); store.save_project(project)
         session = ResearchSession(project_id=project.id, title="新研究")
         store.save_session(session)
-        return {"project": {"id": str(project.id), "name": project.name, "symbol": project.symbol, "market": project.market}, "session": {"id": str(session.id), "project_id": str(project.id), "title": session.title, "status": session.status, "latest_event_at": session.latest_event_at.isoformat()}}
+        return {"project": {"id": str(project.id), "name": project.name, "name_zh": project.name_zh, "symbol": project.symbol, "market": project.market}, "session": {"id": str(session.id), "project_id": str(project.id), "title": session.title, "status": session.status, "latest_event_at": session.latest_event_at.isoformat()}}
     finally:
         store.close()
 
@@ -845,7 +902,7 @@ def company_panel_payload(symbol: str, market: str) -> dict[str, Any]:
             return {"available": False}
         return {
             "available": True,
-            "project": {"id": str(project.id), "name": project.name, "symbol": project.symbol, "market": project.market},
+            "project": {"id": str(project.id), "name": project.name, "name_zh": project.name_zh, "symbol": project.symbol, "market": project.market},
             "sources": store.list_company_sources(project.company_id),
             "documents": store.list_company_documents(project.company_id),
             "reports": store.list_project_reports(project.id),
@@ -1212,14 +1269,14 @@ def history_payload(path: str) -> dict[str, Any] | list[dict[str, Any]]:
                 return []
             pattern = f"%{query}%"
             rows = store.connection.execute(
-                """SELECT s.*, p.id AS company_id, p.name AS company_name, p.symbol AS company_symbol, p.market AS company_market
-                   FROM sessions s JOIN projects p ON p.id=s.project_id
-                   WHERE s.title LIKE ? OR s.last_event_preview LIKE ?
-                      OR EXISTS (SELECT 1 FROM session_messages m WHERE m.session_id=s.id AND m.content_json LIKE ?)
-                   ORDER BY s.latest_event_at DESC, s.created_at DESC LIMIT 50""",
-                (pattern, pattern, pattern),
-            ).fetchall()
-            return [{"session": {"id": row["id"], "project_id": row["project_id"], "title": row["title"], "status": row["status"], "latest_event_at": row["latest_event_at"], "last_event_preview": row["last_event_preview"]}, "company": {"id": row["company_id"], "name": row["company_name"], "symbol": row["company_symbol"], "market": row["company_market"]}} for row in rows]
+                    """SELECT s.*, p.id AS company_id, p.name AS company_name, p.name_zh AS company_name_zh, p.symbol AS company_symbol, p.market AS company_market
+                       FROM sessions s JOIN projects p ON p.id=s.project_id
+                       WHERE s.title LIKE ? OR s.last_event_preview LIKE ?
+                          OR EXISTS (SELECT 1 FROM session_messages m WHERE m.session_id=s.id AND m.content_json LIKE ?)
+                       ORDER BY s.latest_event_at DESC, s.created_at DESC LIMIT 50""",
+                    (pattern, pattern, pattern),
+                ).fetchall()
+            return [{"session": {"id": row["id"], "project_id": row["project_id"], "title": row["title"], "status": row["status"], "latest_event_at": row["latest_event_at"], "last_event_preview": row["last_event_preview"]}, "company": {"id": row["company_id"], "name": row["company_name"], "name_zh": row["company_name_zh"], "symbol": row["company_symbol"], "market": row["company_market"]}} for row in rows]
         if parsed.path == "/api/projects":
             return store.list_projects()
         if parsed.path.startswith("/api/projects/") and parsed.path.endswith("/sessions"):

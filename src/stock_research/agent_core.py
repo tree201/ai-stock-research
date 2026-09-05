@@ -286,6 +286,12 @@ def _finalize(
             if not answer:
                 answer = "研究已完成，报告已生成。"
             return AgentOutcome(answer, steps, citations, report=research.report, run_id=research.run_id, plan_steps=tools.plan_steps)
+        # 研究未完成（中途 final / review 未过）：暂停 run 保留恢复语义，
+        # 后续"继续研究"可从 checkpoint 续跑。已暂停/终态时幂等跳过。
+        try:
+            research.workflow.pause(research.run_id)
+        except ValueError:
+            pass
         review = research.review
         if review is not None and review.get("status") == "needs_review":
             # 资料质量问题走 ValueError（与旧管线契约一致，提示用户补资料），

@@ -13,7 +13,7 @@ from stock_research.documents import FetchedDocument
 from stock_research.domain import SessionMessage
 from stock_research.llm import HeuristicLLMProvider, ModelNotConfiguredError
 from stock_research.market_data import PriceBar
-from stock_research.service import add_company_source, chat_entry_payload, chat_payload, discover_documents, history_payload, provider_status, recalculate_report, remove_company, remove_company_source, research_documents, resolve_provider, run_research_payload, run_update_payload
+from stock_research.service import add_company_source, chat_entry_payload, chat_payload, create_project_with_session, discover_documents, history_payload, provider_status, recalculate_report, remove_company, remove_company_source, research_documents, resolve_provider, run_research_payload, run_update_payload
 from stock_research.jobs import InlineQueue, create_and_enqueue, execute_research_job
 from stock_research.storage import SQLiteStore
 from stock_research.web_search import SearchResult
@@ -73,7 +73,8 @@ class WebMvpTests(unittest.TestCase):
             {"AI_STOCK_DB": f"{directory}/research.sqlite3", "AI_STOCK_QUEUE": "rq", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
             clear=False,
         ):
-            first = chat_entry_payload({"name": "腾讯", "symbol": "00700", "content": "你好"}, db_path=f"{directory}/research.sqlite3")
+            with patch("stock_research.service.create_and_enqueue", return_value={"job_id": "job-0", "queue_job_id": "rq-0"}):
+                first = chat_entry_payload({"name": "腾讯", "symbol": "00700", "content": "你好"}, db_path=f"{directory}/research.sqlite3")
             with patch("stock_research.service.create_and_enqueue", return_value={"job_id": "job-1", "queue_job_id": "rq-1"}):
                 result = chat_payload(UUID(first["session_id"]), "研究这家公司", db_path=f"{directory}/research.sqlite3")
             self.assertEqual(result["type"], "research_queued")
@@ -89,8 +90,10 @@ class WebMvpTests(unittest.TestCase):
                 "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
                 "document": "Revenue FY2024 HK$ 100 million",
             }, db_path=f"{directory}/research.sqlite3")
-            with self.assertRaises(ValueError):
-                chat_payload(UUID(report["session_id"]), "你能研究一下这家公司的基本面吗？", db_path=f"{directory}/research.sqlite3")
+            # 统一循环下"研究"字样不再特判：无 chat_json 的 provider 走 canned 应答，
+            # 但用户消息必须持久化。
+            result = chat_payload(UUID(report["session_id"]), "你能研究一下这家公司的基本面吗？", db_path=f"{directory}/research.sqlite3")
+            self.assertEqual(result["type"], "answer")
             messages = history_payload(f"/api/sessions/{report['session_id']}")["messages"]
             user_texts = [message["content"]["text"] for message in messages if message["role"] == "user"]
             self.assertIn("你能研究一下这家公司的基本面吗？", user_texts)
@@ -288,6 +291,7 @@ class WebMvpTests(unittest.TestCase):
                 }, db_path=f"{directory}/research.sqlite3")
 
     def test_chat_update_intent_runs_incremental_update(self) -> None:
+        """更新研究不再由聊天关键词触发：直接走 run_update_payload 服务入口。"""
         contents = {"body": "<p>Revenue FY2024 HK$ 100 million</p>"}
 
         class FakeFetcher:
@@ -302,7 +306,7 @@ class WebMvpTests(unittest.TestCase):
             {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
             clear=False,
         ):
-            chat_entry_payload({"name": "腾讯", "symbol": "00700", "content": "你好"}, db_path=f"{directory}/research.sqlite3")
+            create_project_with_session({"name": "腾讯", "symbol": "00700"})
             add_company_source("00700", "HK", "https://ir.example.com/results.html")
             with patch("stock_research.service.HttpDocumentFetcher", FakeFetcher):
                 initial = run_research_payload({
@@ -310,10 +314,12 @@ class WebMvpTests(unittest.TestCase):
                 }, db_path=f"{directory}/research.sqlite3")
             contents["body"] = "<p>Revenue FY2025 HK$ 120 million</p>"
             with patch("stock_research.service.HttpDocumentFetcher", FakeFetcher):
-                result = chat_payload(UUID(initial["session_id"]), "更新研究", db_path=f"{directory}/research.sqlite3")
-            self.assertEqual(result["type"], "research_started")
-            self.assertTrue(result["report"]["diff"]["new_facts"])
-            self.assertEqual(result["report"]["update_of"], initial["report_id"])
+                report = run_update_payload({
+                    "name": "腾讯", "symbol": "00700", "as_of_date": "2026-06-30", "question": "更新研究",
+                    "_session_message_saved": True, "session_id": initial["session_id"],
+                }, db_path=f"{directory}/research.sqlite3", session_id=UUID(initial["session_id"]))
+            self.assertTrue(report["diff"]["new_facts"])
+            self.assertEqual(report["update_of"], initial["report_id"])
 
     def test_repeated_symbol_reuses_project_but_creates_new_run(self) -> None:
         with TemporaryDirectory() as directory, patch.dict(
@@ -346,11 +352,17 @@ class WebMvpTests(unittest.TestCase):
             self.assertEqual(session["session"]["project_id"], history_payload("/api/companies")[0]["id"])
 
     def test_chat_follow_up_uses_configured_provider_answer(self) -> None:
-        class FakeProvider:
-            def answer(self, question: str, context: str, company_name: str = "", company_symbol: str = "") -> str:
-                self.question = question
-                self.context = context
-                return "基于报告，净利润率约为 20%。"
+        """追问经统一循环：chat_json provider 按脚本调用 query_report 后回答。"""
+
+        class ScriptedProvider:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def chat_json(self, system: str, user: str) -> dict:
+                self.calls.append("chat_json")
+                if len(self.calls) == 1:
+                    return {"thought": "查报告", "action": "query_report", "args": {"keyword": "Net income"}}
+                return {"thought": "够了", "action": "final", "answer": "基于报告，净利润率约为 20%。[O1]"}
 
         with TemporaryDirectory() as directory, patch.dict(
             os.environ,
@@ -361,27 +373,34 @@ class WebMvpTests(unittest.TestCase):
                 "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
                 "document": "Revenue FY2024 HK$ 100 million\nNet income FY2024 HK$ 20 million",
             }, db_path=f"{directory}/research.sqlite3")
-            with patch("stock_research.service.resolve_provider", return_value=FakeProvider()):
+            provider = ScriptedProvider()
+            with patch("stock_research.service.resolve_provider", return_value=provider):
                 answer = chat_payload(UUID(report["session_id"]), "利润率怎么看？", db_path=f"{directory}/research.sqlite3")
-            self.assertEqual(answer["message"], "基于报告，净利润率约为 20%。")
+            self.assertEqual(provider.calls, ["chat_json", "chat_json"])
+            self.assertIn("20%", answer["message"])
+            self.assertNotIn("run_id", answer, "纯探索回答不应携带 run_id")
 
     def test_chat_follow_up_skips_cross_company_report_context(self) -> None:
-        class FakeProvider:
-            def __init__(self) -> None:
-                self.context: str | None = None
-                self.company_name: str | None = None
+        """query_report 按项目隔离：长和会话里查报告绝不会看到腾讯数据。"""
 
-            def answer(self, question: str, context: str = "", company_name: str = "", company_symbol: str = "") -> str:
-                self.context = context
-                self.company_name = company_name
-                return "ok"
+        class ScriptedProvider:
+            def __init__(self) -> None:
+                self.prompts: list[str] = []
+                self.company_names: list[str] = []
+
+            def chat_json(self, system: str, user: str) -> dict:
+                self.prompts.append(user)
+                self.company_names.append("长江和记" if "长江和记" in system else "其他")
+                if len(self.prompts) == 1:
+                    return {"thought": "查报告", "action": "query_report", "args": {"keyword": "Revenue"}}
+                return {"thought": "够了", "action": "final", "answer": "ok"}
 
         with TemporaryDirectory() as directory, patch.dict(
             os.environ,
             {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
             clear=False,
         ):
-            tencent = run_research_payload({
+            run_research_payload({
                 "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
                 "document": "Revenue FY2024 HK$ 100 million",
             }, db_path=f"{directory}/research.sqlite3")
@@ -389,37 +408,35 @@ class WebMvpTests(unittest.TestCase):
                 "name": "长江和记", "symbol": "00001", "as_of_date": "2025-12-31", "question": "研究公司",
                 "document": "Revenue FY2024 HK$ 200 million",
             }, db_path=f"{directory}/research.sqlite3")
-            # 模拟历史污染：把腾讯的报告卡片消息塞进长和的会话。
-            store = SQLiteStore(f"{directory}/research.sqlite3")
-            store.save_session_message(SessionMessage(UUID(ckh["session_id"]), "assistant", "report_card", {"text": "研究已完成", "report_id": tencent["report_id"]}))
-            store.close()
-            provider = FakeProvider()
+            provider = ScriptedProvider()
             with patch("stock_research.service.resolve_provider", return_value=provider):
                 chat_payload(UUID(ckh["session_id"]), "现金流怎么看？", db_path=f"{directory}/research.sqlite3")
-            # 串号报告必须被跳过：上下文里不得出现腾讯报告，
-            # 且 identity 信息使用会话公司（长江和记）。
-            self.assertIsNotNone(provider.context)
-            self.assertNotIn("腾讯", provider.context or "")
-            self.assertIn("长江和记", provider.context or "")
-            self.assertEqual(provider.company_name, "长江和记")
+            # identity 注入会话公司；观察只能来自长和自己的报告。
+            self.assertTrue(provider.company_names)
+            self.assertTrue(all(name == "长江和记" for name in provider.company_names))
+            transcript = "\n".join(provider.prompts)
+            self.assertIn("200", transcript)
+            self.assertNotIn("100 million", transcript)
 
     def test_chat_search_intent_uses_web_search(self) -> None:
-        class FakeProvider:
-            def __init__(self):
+        """搜索意图由模型经 search_news 工具发起，不再靠关键词判别。"""
+
+        class ScriptedProvider:
+            def __init__(self) -> None:
                 self.calls: list[str] = []
 
-            def answer(self, question: str, context: str = "", company_name: str = "", company_symbol: str = "") -> str:
-                self.calls.append("answer")
-                return "report answer"
-
-            def answer_with_search(self, question: str, search_results, report_context: str = "", company_name: str = "", company_symbol: str = "") -> str:
-                self.calls.append("answer_with_search")
-                return "search answer"
+            def chat_json(self, system: str, user: str) -> dict:
+                self.calls.append("chat_json")
+                if "已完成" not in user:
+                    return {"thought": "搜新闻", "action": "search_news", "args": {"query": "最新"}}
+                return {"thought": "够了", "action": "final", "answer": "search answer"}
 
         class FakeSearch:
             def search(self, query: str, max_results: int = 5):
+                self.query = query
                 return [SearchResult(title="t", url="https://example.com", snippet="s")]
 
+        fake_search = FakeSearch()
         with TemporaryDirectory() as directory, patch.dict(
             os.environ,
             {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
@@ -429,20 +446,25 @@ class WebMvpTests(unittest.TestCase):
                 "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
                 "document": "Revenue FY2024 HK$ 100 million",
             }, db_path=f"{directory}/research.sqlite3")
-            provider = FakeProvider()
+            provider = ScriptedProvider()
             with patch("stock_research.service.resolve_provider", return_value=provider), \
-                 patch("stock_research.service.DuckDuckGoSearch", FakeSearch):
+                 patch("stock_research.tools.GoogleNewsSearch", return_value=fake_search):
                 answer = chat_payload(UUID(report["session_id"]), "腾讯最新新闻是什么？", db_path=f"{directory}/research.sqlite3")
             self.assertEqual(answer["message"], "search answer")
-            self.assertEqual(provider.calls, ["answer_with_search"])
+            self.assertIn("腾讯", fake_search.query)
 
-    def test_chat_search_falls_back_to_report_when_no_results(self) -> None:
-        class FakeProvider:
-            def answer(self, question: str, context: str = "", company_name: str = "", company_symbol: str = "") -> str:
-                return "report answer"
+    def test_chat_search_empty_results_feeds_back_to_model(self) -> None:
+        """搜索无结果时观察回灌循环，模型据实回答而不是编造。"""
 
-            def answer_with_search(self, question: str, search_results, report_context: str = "", company_name: str = "", company_symbol: str = "") -> str:
-                return "search answer"
+        class ScriptedProvider:
+            def __init__(self) -> None:
+                self.saw_empty_note = False
+
+            def chat_json(self, system: str, user: str) -> dict:
+                if "没有搜到" in user:
+                    self.saw_empty_note = True
+                    return {"thought": "据实回答", "action": "final", "answer": "没有找到相关新闻。"}
+                return {"thought": "搜新闻", "action": "search_news", "args": {"query": "最新"}}
 
         class EmptySearch:
             def search(self, query: str, max_results: int = 5):
@@ -457,11 +479,13 @@ class WebMvpTests(unittest.TestCase):
                 "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
                 "document": "Revenue FY2024 HK$ 100 million",
             }, db_path=f"{directory}/research.sqlite3")
-            with patch("stock_research.service.resolve_provider", return_value=FakeProvider()), \
-                 patch("stock_research.service.DuckDuckGoSearch", EmptySearch), \
-                 patch("stock_research.service.GoogleNewsSearch", EmptySearch):
+            provider = ScriptedProvider()
+            with patch("stock_research.service.resolve_provider", return_value=provider), \
+                 patch("stock_research.tools.GoogleNewsSearch", return_value=EmptySearch()), \
+                 patch("stock_research.tools.DuckDuckGoSearch", return_value=EmptySearch()):
                 answer = chat_payload(UUID(report["session_id"]), "腾讯最新新闻", db_path=f"{directory}/research.sqlite3")
-            self.assertEqual(answer["message"], "report answer")
+            self.assertEqual(answer["message"], "没有找到相关新闻。")
+            self.assertTrue(provider.saw_empty_note)
 
     def test_first_chat_message_creates_session_without_forcing_research(self) -> None:
         with TemporaryDirectory() as directory, patch.dict(

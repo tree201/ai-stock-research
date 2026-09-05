@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Protocol
 from uuid import UUID, uuid4
 
@@ -41,13 +41,35 @@ def find_resumable_run(store: SQLiteStore, session_id: UUID, question: str) -> U
 
 
 def execute_research_job(job_id: str, db_path: str) -> dict[str, Any]:
-    """RQ target: load a durable job, execute it, and record its outcome."""
+    """RQ target: load a durable job, execute it, and record its outcome.
+
+    payload kind=="chat" 表示整轮聊天任务（统一 agent 循环可能内含完整
+    研究，耗时分钟级，因此 RQ 模式下整个 turn 入队执行）。
+    """
     store = SQLiteStore(db_path)
     try:
         job = store.load_job(UUID(job_id))
         job_uuid = UUID(job_id)
         store.update_job(job_uuid, status="running", attempts=int(job["attempts"]) + 1)
-        store.append_session_event(UUID(job["session_id"]), "research/running", {"preview": "后台研究正在执行", "job_id": job_id}, datetime.now(timezone.utc))
+        store.append_session_event(UUID(job["session_id"]), "research/running", {"preview": "后台任务正在执行", "job_id": job_id}, datetime.now(timezone.utc))
+        payload = dict(job["payload"])
+        if str(payload.get("kind", "")) == "chat":
+            from .service import chat_payload  # lazy import avoids service/jobs cycle
+            result = chat_payload(
+                UUID(job["session_id"]),
+                str(payload.get("content", "")),
+                db_path=db_path,
+                as_of_date=date.fromisoformat(payload["as_of_date"]) if payload.get("as_of_date") else None,
+                llm_config=payload.get("llm"),
+                document_urls=payload.get("document_urls"),
+                document_text=payload.get("document"),
+                # 入队前已保存用户消息时跳过，避免重复落库。
+                _save_user_message=not bool(payload.get("_session_message_saved", False)),
+            )
+            run_id = result.get("run_id")
+            store.update_job(job_uuid, status="completed", run_id=UUID(run_id) if run_id else None)
+            store.append_session_event(UUID(job["session_id"]), "research/completed", {"preview": "后台任务已完成", "job_id": job_id, **({"run_id": run_id} if run_id else {})}, datetime.now(timezone.utc))
+            return result
         from .service import run_research_payload  # lazy import avoids service/jobs cycle
         payload = _attach_resume_run(store, job)
         result = run_research_payload(payload, db_path=db_path, session_id=UUID(job["session_id"]))

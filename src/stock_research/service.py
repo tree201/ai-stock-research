@@ -16,8 +16,8 @@ from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
 
 from .documents import DocumentFetchError, FetchedDocument, HttpDocumentFetcher, PdfTextExtractor, RawDocument, UnsupportedDocumentType, extract_text
-from .domain import ResearchProject, ResearchSession, SessionMessage, utc_now
-from .agent import run_exploration
+from .domain import ResearchProject, ResearchSession, RunStatus, SessionMessage, utc_now
+from .agent_core import UnifiedTools, run_agent_turn
 from .tools import CompanyTools
 from .facts import FactCandidate
 from .pipeline import ResearchPipeline
@@ -448,6 +448,22 @@ def merged_research_payload(store: SQLiteStore, project: ResearchProject, payloa
     return {**payload, "document_urls": merged}
 
 
+def prepare_documents(store: SQLiteStore, project: ResearchProject, payload: dict[str, Any], as_of_date: date) -> list[RawDocument]:
+    """研究资料准备：登记来源 + 请求 URL 合并，未命中时 agent 自动检索。
+
+    供 run_research_payload 与聊天侧惰性研究激活共用；返回空列表时由
+    调用方决定报错（显式研究）还是降级为探索（聊天内研究）。
+    """
+    payload = merged_research_payload(store, project, payload)
+    documents = research_documents(payload, project.company_id, as_of_date, store=store)
+    if not documents:
+        # Agent 自动找资料：不因未登记来源而拒绝研究。
+        documents = discover_documents(project, project.company_id, as_of_date, store=store)
+        for document in documents:
+            store.add_company_source(project.company_id, document.source_url, document.title, source_class="public")
+    return documents
+
+
 def run_research_payload(payload: dict[str, Any], db_path: str | Path | None = None, session_id: UUID | None = None) -> dict[str, Any]:
     if str(payload.get("mode", "")).strip().casefold() == "update":
         return run_update_payload(payload, db_path=db_path, session_id=session_id)
@@ -468,13 +484,7 @@ def run_research_payload(payload: dict[str, Any], db_path: str | Path | None = N
         pipeline.workflow.create_session(session)
         if not payload.get("_session_message_saved"):
             store.save_session_message(SessionMessage(session.id, "user", "text", {"text": question}))
-        payload = merged_research_payload(store, project, payload)
-        documents = research_documents(payload, project.company_id, as_of_date, store=store)
-        if not documents:
-            # Agent 自动找资料：不因未登记来源而拒绝研究。
-            documents = discover_documents(project, project.company_id, as_of_date, store=store)
-            for document in documents:
-                store.add_company_source(project.company_id, document.source_url, document.title, source_class="public")
+        documents = prepare_documents(store, project, payload, as_of_date)
         if not documents:
             raise ValueError("自动检索未找到可用资料：请粘贴财报/公告文本，或在「公司详情 → 资料」登记 HKEX/公司 IR 资料链接。")
         resume_raw = payload.get("_resume_run_id")
@@ -566,9 +576,6 @@ def run_update_payload(payload: dict[str, Any], db_path: str | Path | None = Non
         return report
     finally:
         store.close()
-
-
-SEARCH_INTENT_WORDS = ("搜", "联网", "网络", "最新", "最近", "新闻", "资讯", "消息", "公告", "股价", "行情", "价格")
 
 
 ASSUMPTION_KEYS = frozenset({"revenue_prior", "revenue_years", "growth_rates", "discount_rate", "terminal_growth", "shares", "base_fcf", "net_cash"})
@@ -665,35 +672,116 @@ def recalculate_report(report_id: str, assumptions: dict[str, Any] | None = None
         store.close()
 
 
-def answer_follow_up(provider: Any, content: str, report_context: str, project: ResearchProject, trusted_hosts: Iterable[str] | None = None) -> str:
-    """Answer a follow-up, searching the web when the question asks for it."""
-    lowered = content.casefold()
-    wants_search = any(word in lowered for word in SEARCH_INTENT_WORDS)
-    if wants_search and hasattr(provider, "answer_with_search"):
-        results = DuckDuckGoSearch().search(f"{project.name} {project.symbol} {content}", max_results=5)
-        if not results:
-            # Google News RSS matches the user's own phrasing far better than
-            # the stored English company name, so try it first.
-            for candidate in (content, project.name):
-                results = GoogleNewsSearch().search(candidate, max_results=5)
-                if results:
-                    break
-        if results:
-            annotated = [
-                {
-                    "title": item.title,
-                    "url": item.url,
-                    "snippet": item.snippet,
-                    "trust": "whitelist" if host_in_set(item.url, trusted_hosts if trusted_hosts is not None else DEFAULT_TRUSTED_HOSTS) else "unverified",
-                }
-                for item in results
-            ]
-            return provider.answer_with_search(content, annotated, report_context, company_name=project.name, company_symbol=project.symbol)
-    return provider.answer(content, report_context, company_name=project.name, company_symbol=project.symbol)
+class ChatResearchWorkspace:
+    """聊天内惰性研究激活：模型首次调用研究工具/plan 时才建 run。
+
+    activate 只成功一次；无资料时 pause run 并返回 None（模型会收到
+    可行动的观察，转用探索工具回答）。finalize 负责报告落库与状态收尾。
+    """
+
+    def __init__(
+        self,
+        store: SQLiteStore,
+        project: ResearchProject,
+        session: ResearchSession,
+        *,
+        as_of_date: date,
+        llm_config: dict[str, Any] | None,
+        document_urls: Any = None,
+        document_text: Any = None,
+        db_path: str | Path | None = None,
+    ) -> None:
+        self.store = store
+        self.project = project
+        self.session = session
+        self.as_of_date = as_of_date or date.today()
+        self.llm_config = llm_config
+        self.document_urls = document_urls
+        self.document_text = document_text
+        self.db_path = db_path
+        self.workflow: ResearchWorkflow | None = None
+        self.run = None
+        self.research_tools = None
+        self._activated = False
+
+    def activate(self, question: str):
+        """创建 run + 预置计划 + 准备资料；返回 ResearchTools 或 None。"""
+        if self._activated:
+            return self.research_tools
+        self._activated = True
+        self.workflow = ResearchWorkflow(store=self.store)
+        self.workflow.create_project(self.project)
+        self.workflow.create_session(self.session)
+        run = self.workflow.create_run(
+            self.project.id, question, self.as_of_date, run_type="initial", session_id=self.session.id,
+        )
+        self.workflow.plan(run.id)
+        documents = prepare_documents(self.store, self.project, {"document_urls": self.document_urls, "document": self.document_text}, self.as_of_date)
+        if not documents:
+            # 无资料不走完整研究：pause 让后续"研究这家公司"可恢复语义简单，
+            # 模型收到引导观察后转探索工具回答。
+            try:
+                self.workflow.pause(run.id)
+            except ValueError:
+                pass
+            return None
+        from .orchestrator import ResearchTools
+
+        tools = ResearchTools(
+            self.workflow,
+            run.id,
+            llm_provider=resolve_provider(self.llm_config),
+            dcf_assumptions=default_dcf_assumptions(),
+            question=question,
+        )
+        tools.documents = documents
+        self.run = run
+        self.research_tools = tools
+        self.session.active_run_id = run.id
+        self.store.save_session(self.session)
+        return tools
+
+    def failure_reason(self) -> str:
+        return (
+            "没有可用资料，无法启动研究：请在「公司详情 → 资料」登记 HKEX/公司 IR 财报公告链接后重试，"
+            "或改用探索工具回答用户问题。"
+        )
+
+    def finalize(self, outcome: Any) -> None:
+        """研究出报告则落 report_card；研究未完成则 pause 留给后续恢复。"""
+        if self.workflow is None or self.run is None:
+            return
+        run = self.workflow.runs[self.run.id]
+        report = getattr(outcome, "report", None)
+        if report is not None:
+            self.workflow.finish(run.id)
+            # 统一循环的 compile_report 不经 pipeline.run，报告 id 在此补齐
+            report.setdefault("report_id", str(uuid4()))
+            saved_id = self.store.save_report(run.id, report, UUID(report["report_id"]))
+            version_row = self.store.connection.execute("SELECT version FROM reports WHERE id=?", (str(saved_id),)).fetchone()
+            report["version"] = int(version_row[0]) if version_row else None
+            report["run_id"] = str(run.id)
+            self.store.save_session_message(SessionMessage(
+                self.session.id, "assistant", "report_card",
+                {"text": "研究已完成", "report_id": report["report_id"], "summary": report.get("summary", [])},
+                run_id=run.id, report_id=saved_id,
+            ))
+        elif run.status not in {RunStatus.COMPLETED, RunStatus.CANCELED, RunStatus.FAILED}:
+            try:
+                self.workflow.pause(run.id)
+            except ValueError:
+                pass
+        self.session.active_run_id = None
+        self.session.updated_at = utc_now()
+        self.store.save_session(self.session)
 
 
-def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = None, as_of_date: date | None = None, llm_config: dict[str, Any] | None = None, document_urls: Any = None) -> dict[str, Any]:
-    """Handle one chat message without exposing workflow internals to the UI."""
+def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = None, as_of_date: date | None = None, llm_config: dict[str, Any] | None = None, document_urls: Any = None, document_text: Any = None, _save_user_message: bool = True) -> dict[str, Any]:
+    """Handle one chat message without exposing workflow internals to the UI.
+
+    统一 agent 循环：不再按关键词路由。模型自主决定探索（秒答）或
+    完整研究（惰性建 run → 出报告落库）。
+    """
     content = content.strip()
     if not content:
         raise ValueError("content is required")
@@ -701,69 +789,65 @@ def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = No
     try:
         session = store.load_session(session_id)
         project = store.load_project(session.project_id)
-        resolve_provider(llm_config)
-        lowered = content.casefold()
-        research_intent = any(word in lowered for word in ("研究", "分析", "估值", "长期持有", "更新"))
-        if research_intent:
-            if as_of_date is None:
-                as_of_date = date.today()
-            research_payload = {"name": project.name, "symbol": project.symbol, "as_of_date": as_of_date.isoformat(), "question": content, "_session_message_saved": True, "llm": llm_config, "document_urls": document_urls, "mode": "update" if "更新" in lowered else "initial"}
-            store.save_session_message(SessionMessage(session_id, "user", "text", {"text": content}))
-            if os.getenv("AI_STOCK_QUEUE", "inline").casefold() == "rq":
-                job = create_and_enqueue(store, session_id, research_payload, db_path or database_path())
-                return {"type": "research_queued", "session_id": str(session_id), **job}
-            report = run_research_payload(research_payload, db_path=db_path or database_path(), session_id=session_id)
-            return {"type": "research_started", "session_id": str(session_id), "run_id": report["run_id"], "report_id": report["report_id"], "report": report}
-        store.save_session_message(SessionMessage(session_id, "user", "text", {"text": content}))
-        answer = "我会基于当前公司的研究资料回答。你可以问我具体指标，或说‘研究这家公司’启动一次完整研究。"
         provider = resolve_provider(llm_config)
-        if "模型" in content and hasattr(provider, "model"):
-            provider_label = "DeepSeek" if getattr(provider, "provider_name", "") == "deepseek" else "OpenAI 兼容模型"
-            answer = f"当前使用的是 {provider_label} 的 {getattr(provider, 'model', 'unknown')}。"
-        elif hasattr(provider, "chat_json"):
-            # 工具化探索：由模型自主决定调用哪个工具，不再按关键词路由。
-            exploration = run_exploration(provider, project, content, CompanyTools(project, store=store))
-            for step in exploration["steps"]:
-                store.save_session_message(SessionMessage(
-                    session_id, "assistant", "tool",
-                    {
-                        "text": f"探索 {step['ref']}：{step['tool']}（{json.dumps(step['args'], ensure_ascii=False)}）",
-                        "tool": step["tool"],
-                        "args": step["args"],
-                        "observation": step["observation"][:600],
-                    },
-                ))
-            answer = exploration["answer"]
-            # 证据链随回答持久化：引用 + 观察编号，供 grounding 评测使用。
-            store.save_session_message(SessionMessage(
-                session_id, "assistant", "text",
-                {"text": answer, "citations": exploration["citations"], "observation_refs": [step["ref"] for step in exploration["steps"]]},
-            ))
+        if _save_user_message:
+            store.save_session_message(SessionMessage(session_id, "user", "text", {"text": content}))
+        if os.getenv("AI_STOCK_QUEUE", "inline").casefold() == "rq":
+            # RQ 模式：整轮聊天作为后台任务执行（统一循环可能内含完整研究）。
+            research_payload = {
+                "kind": "chat", "content": content,
+                "as_of_date": (as_of_date or date.today()).isoformat(),
+                "llm": llm_config, "document_urls": document_urls, "document": document_text,
+                "_session_message_saved": bool(_save_user_message),
+            }
+            job = create_and_enqueue(store, session_id, research_payload, db_path or database_path())
+            return {"type": "research_queued", "session_id": str(session_id), **job}
+        if not hasattr(provider, "chat_json"):
+            # 无 chat_json 的 provider（keyless 测试/降级路径）：保留 canned 应答。
+            answer = "我会基于当前公司的研究资料回答。你可以问我具体指标，或说‘研究这家公司’启动一次完整研究。"
+            if "模型" in content and hasattr(provider, "model"):
+                provider_label = "DeepSeek" if getattr(provider, "provider_name", "") == "deepseek" else "OpenAI 兼容模型"
+                answer = f"当前使用的是 {provider_label} 的 {getattr(provider, 'model', 'unknown')}。"
+            store.save_session_message(SessionMessage(session_id, "assistant", "text", {"text": answer}))
             return {"type": "answer", "session_id": str(session_id), "message": answer}
-        elif hasattr(provider, "answer"):
-            report_context = ""
-            for message in reversed(store.list_session_messages(session_id)):
-                report_id = message.get("content", {}).get("report_id")
-                if report_id:
-                    try:
-                        report = store.load_report(UUID(report_id))
-                    except (ValueError, KeyError):
-                        continue
-                    # identity 校验：报告公司必须与当前会话公司一致，
-                    # 防止串号报告（如 CKH 会话里出现腾讯数据）作为上下文喂给模型。
-                    report_company = report.get("company") or {}
-                    report_symbol = str(report_company.get("symbol", ""))
-                    if report_symbol and report_symbol != project.symbol:
-                        continue
-                    report_context = str(report.get("markdown", ""))
-                    if report_context:
-                        break
-            try:
-                answer = answer_follow_up(provider, content, report_context, project, trusted_hosts=store.trusted_hosts_set())
-            except LLMError:
-                raise
-        store.save_session_message(SessionMessage(session_id, "assistant", "text", {"text": answer}))
-        return {"type": "answer", "session_id": str(session_id), "message": answer}
+
+        workspace = ChatResearchWorkspace(
+            store, project, session,
+            as_of_date=as_of_date if as_of_date is not None else date.today(),
+            llm_config=llm_config,
+            document_urls=document_urls,
+            document_text=document_text,
+            db_path=db_path,
+        )
+        company_tools = CompanyTools(project, store=store)
+        tools = UnifiedTools(company_tools, workspace.activate)
+
+        def persist_step(step: dict[str, Any]) -> None:
+            label = "研究规划" if step["tool"] == "plan" else "探索"
+            store.save_session_message(SessionMessage(
+                session_id, "assistant", "tool",
+                {
+                    "text": f"{label} {step['ref']}：{step['tool']}（{json.dumps(step['args'], ensure_ascii=False)}）",
+                    "tool": step["tool"],
+                    "args": step["args"],
+                    "observation": step["observation"][:600],
+                },
+            ))
+
+        outcome = run_agent_turn(provider, project, content, tools, on_step=persist_step)
+        workspace.finalize(outcome)
+        answer = outcome.answer
+        # 证据链随回答持久化：引用 + 观察编号，供 grounding 评测使用。
+        store.save_session_message(SessionMessage(
+            session_id, "assistant", "text",
+            {"text": answer, "citations": outcome.citations, "observation_refs": [step["ref"] for step in outcome.steps]},
+        ))
+        result: dict[str, Any] = {"type": "answer", "session_id": str(session_id), "message": answer}
+        if outcome.report is not None:
+            result["run_id"] = str(outcome.run_id) if outcome.run_id else outcome.report.get("run_id")
+            result["report_id"] = outcome.report.get("report_id")
+            result["report"] = outcome.report
+        return result
     finally:
         store.close()
 
@@ -785,7 +869,7 @@ def chat_entry_payload(payload: dict[str, Any], db_path: str | Path | None = Non
         session_id = session.id
     finally:
         store.close()
-    return chat_payload(session_id, content, db_path=db_path, as_of_date=date.fromisoformat(payload["as_of_date"]) if payload.get("as_of_date") else None, llm_config=payload.get("llm"))
+    return chat_payload(session_id, content, db_path=db_path, as_of_date=date.fromisoformat(payload["as_of_date"]) if payload.get("as_of_date") else None, llm_config=payload.get("llm"), document_urls=payload.get("document_urls"), document_text=payload.get("document"))
 
 
 def create_project_with_session(payload: dict[str, Any]) -> dict[str, Any]:

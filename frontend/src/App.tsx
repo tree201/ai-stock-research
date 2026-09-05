@@ -81,8 +81,33 @@ function TrustBadge({ trust }: { trust?: string | null }) {
   return <span className={badge.className}>{badge.label}</span>;
 }
 
+function ToolMessage({ message }: { message: Message }) {
+  const { tool, args } = message.content;
+  if (tool === "plan") {
+    const steps = Array.isArray(args?.steps) ? (args.steps as { key?: string; purpose?: string }[]) : [];
+    const chain = steps
+      .map((step) => (step.purpose?.trim() || (step.key ? STEP_LABELS[step.key] || step.key : "")))
+      .filter(Boolean)
+      .join(" → ");
+    return (
+      <div className="message-row">
+        <div className="message-tool is-plan">
+          <span className="tool-tag">研究规划</span>
+          <span>{chain || message.content.text}</span>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="message-row">
+      <div className="message-tool">{message.content.text}</div>
+    </div>
+  );
+}
+
 function MessageBubble({ message }: { message: Message }) {
   if (message.message_type === "report_card") return null;
+  if (message.message_type === "tool") return <ToolMessage message={message} />;
   const text =
     message.content?.text || message.content?.summary?.join("\n") || "";
   return (

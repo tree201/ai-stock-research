@@ -158,6 +158,8 @@ body { background:var(--paper); color:var(--ink); }
 .suggestions button:hover { border-color:#9acbbb; background:var(--signal-soft); color:#176b59; transform:translateY(-1px); }
 .message-row { margin-bottom:28px; }
 .message-bubble { color:var(--ink-body); font-size:14px; line-height:1.75; }
+.message-tool { display:flex; align-items:center; gap:8px; max-width:78%; font-size:12.5px; color:var(--ink-muted); background:var(--surface-dim); border:1px solid var(--line); border-radius:10px; padding:7px 12px; }
+.message-tool .tool-tag { flex:none; font-size:11px; font-weight:600; color:var(--signal); background:var(--signal-soft); border-radius:6px; padding:2px 8px; }
 .message-row.is-user .message-bubble { background:var(--bubble-user); color:var(--ink); border:1px solid var(--bubble-user-line); border-radius:14px 14px 4px 14px; padding:11px 16px; }
 .composer-wrap { left: var(--sidebar-width, 276px); padding:22px 32px 18px; background:linear-gradient(transparent,var(--paper) 28%); }
 .composer-wrap.panel-open { right: var(--panel-width, 380px); }

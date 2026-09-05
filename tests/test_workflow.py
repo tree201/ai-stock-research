@@ -27,7 +27,7 @@ class ResearchWorkflowTests(unittest.TestCase):
         self.workflow.plan(run.id)
 
         for step in run.steps:
-            started = self.workflow.start_next_step(run.id)
+            started = self.workflow.start_step(run.id, step.step_key)
             self.assertEqual(started.step_key, step.step_key)
             self.workflow.complete_step(run.id, step.step_key, {"ok": True})
 
@@ -46,7 +46,7 @@ class ResearchWorkflowTests(unittest.TestCase):
     def test_failure_is_recorded(self) -> None:
         run = self.workflow.create_run(self.project.id, "研究腾讯", date(2025, 12, 31))
         self.workflow.plan(run.id)
-        step = self.workflow.start_next_step(run.id)
+        step = self.workflow.start_step(run.id, "collect_filings")
         self.workflow.fail_step(run.id, step.step_key, {"code": "SOURCE_TIMEOUT"})
         self.assertEqual(run.status, RunStatus.FAILED)
         self.assertEqual(step.status, "failed")

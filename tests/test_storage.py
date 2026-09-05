@@ -16,7 +16,7 @@ class SQLiteStorageTests(unittest.TestCase):
             workflow.create_project(project)
             run = workflow.create_run(project.id, "研究腾讯", date(2025, 12, 31))
             workflow.plan(run.id)
-            workflow.start_next_step(run.id)
+            workflow.start_step(run.id, "collect_filings")
             workflow.complete_step(run.id, "collect_filings", {"documents": 1})
             store.close()
 

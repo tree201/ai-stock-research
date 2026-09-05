@@ -102,15 +102,17 @@ class PipelineTests(unittest.TestCase):
         older_revenue = self._fact("revenue", 100.0, date(2023, 12, 31))
         latest_revenue = self._fact("revenue", 200.0, date(2024, 12, 31))
         net_income = self._fact("net_income", 50.0, date(2024, 12, 31))
+        from stock_research.pipeline_support import run_calculations
         for facts in ([older_revenue, latest_revenue, net_income], [latest_revenue, older_revenue, net_income]):
-            calculations = ResearchPipeline._calculate(facts, None)
+            calculations = run_calculations(facts, None)
             margin = next(item for item in calculations if item.calculation_type == "net_margin")
             self.assertAlmostEqual(margin.outputs["net_margin"], 0.25)
 
     def test_calculate_excludes_low_confidence_facts(self) -> None:
         revenue = self._fact("revenue", 200.0, date(2024, 12, 31))
         low_confidence_income = self._fact("net_income", 50.0, date(2024, 12, 31), confidence=0.72)
-        calculations = ResearchPipeline._calculate([revenue, low_confidence_income], None)
+        from stock_research.pipeline_support import run_calculations
+        calculations = run_calculations([revenue, low_confidence_income], None)
         self.assertFalse(any(item.calculation_type == "net_margin" for item in calculations))
 
     def test_pipeline_selects_evidence_within_budget_for_llm(self) -> None:

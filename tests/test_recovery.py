@@ -49,7 +49,7 @@ class CountingIngestor:
 
     def __init__(self) -> None:
         self.calls = 0
-        self.delegate = __import__("stock_research.pipeline", fromlist=["DocumentIngestor"]).DocumentIngestor()
+        self.delegate = DocumentIngestor()
 
     def chunk_many(self, documents):
         self.calls += 1
@@ -65,9 +65,9 @@ class AdoptRunTests(unittest.TestCase):
             workflow.create_project(project)
             run = workflow.create_run(project.id, "研究公司", date(2025, 12, 31))
             workflow.plan(run.id)
-            workflow.start_next_step(run.id)
+            workflow.start_step(run.id, "collect_filings")
             workflow.complete_step(run.id, "collect_filings", {"document_count": 1})
-            workflow.start_next_step(run.id)  # extract_financials left running by a dead process
+            workflow.start_step(run.id, "extract_financials")  # left running by a dead process
 
             adopted = workflow.adopt_run(run.id)
             self.assertEqual(adopted.status.value, "paused")
@@ -104,7 +104,7 @@ class PipelineResumeTests(unittest.TestCase):
         try:
             flaky = FlakyLLMProvider()
             pipeline = ResearchPipeline(workflow=ResearchWorkflow(store=store), llm_provider=flaky)
-            pipeline.document_ingestor = CountingIngestor()
+            pipeline.ingestor = CountingIngestor()
             project = ResearchProject(user_id=uuid4(), company_id=uuid4(), symbol="00700", name="腾讯")
             pipeline.workflow.create_project(project)
             document = RawDocument(
@@ -125,7 +125,7 @@ class PipelineResumeTests(unittest.TestCase):
             interrupted = next(iter(pipeline.workflow.runs.values()))
             completed_steps = {step.step_key for step in interrupted.steps if step.status == "completed"}
             self.assertEqual(completed_steps, {"collect_filings", "extract_financials"})
-            self.assertEqual(pipeline.document_ingestor.calls, 1)
+            self.assertEqual(pipeline.ingestor.calls, 1)
 
             report = pipeline.run(
                 project_id=project.id,
@@ -139,7 +139,7 @@ class PipelineResumeTests(unittest.TestCase):
             self.assertGreaterEqual(len(report["facts"]), 2)
             self.assertIn("markdown", report)
             # No re-download: collection ran exactly once across both attempts.
-            self.assertEqual(pipeline.document_ingestor.calls, 1)
+            self.assertEqual(pipeline.ingestor.calls, 1)
             # Model was called once per attempt: the failed one and the retry.
             self.assertEqual(flaky.calls, 2)
 

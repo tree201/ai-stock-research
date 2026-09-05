@@ -113,38 +113,28 @@ class ResearchWorkflow:
         self._emit(run, "run/planned", {"plan_version": run.plan_version, "steps": [step.step_key for step in run.steps]})
         return run
 
-    def start_next_step(self, run_id: UUID) -> ResearchStep:
-        run = self._get_run(run_id)
-        if run.status == RunStatus.PAUSED:
-            pending = next((step for step in run.steps if step.status == "pending"), None)
-            if pending is None:
-                raise ValueError("no pending step to resume")
-            run.transition(self._status_for_step(pending.step_key))
-        elif run.status in {RunStatus.PLANNED, RunStatus.CREATED}:
-            if run.status == RunStatus.CREATED:
-                self.plan(run.id)
-            pending = next((step for step in run.steps if step.status == "pending"), None)
-            if pending is None:
-                raise ValueError("no pending step")
-            run.transition(self._status_for_step(pending.step_key))
-        else:
-            pending = next((step for step in run.steps if step.status == "pending"), None)
-            if pending is None:
-                raise ValueError(f"cannot start a step while run is {run.status.value}")
-            expected = self._status_for_step(pending.step_key)
-            if run.status != expected:
-                run.transition(expected)
+    def start_step(self, run_id: UUID, step_key: str) -> ResearchStep:
+        """ReAct 编排入口：按名启动任意步骤，顺序由编排循环决定。
 
-        pending.status = "running"
-        pending.attempt += 1
-        pending.started_at = utc_now()
-        self._emit(run, "step/started", {"step_key": pending.step_key, "attempt": pending.attempt})
-        return pending
+        步骤可以重复执行（例如模型决定再收一轮资料）：已完成步骤会被重置
+        为 running，attempt 递增。
+        """
+        run = self._get_run(run_id)
+        step = self._get_step(run, step_key)
+        expected = self._status_for_step(step_key)
+        if run.status is not expected:
+            run.transition(expected)
+        step.status = "running"
+        step.attempt += 1
+        step.started_at = utc_now()
+        self._emit(run, "step/started", {"step_key": step_key, "attempt": step.attempt})
+        return step
 
     def complete_step(self, run_id: UUID, step_key: str, output: dict[str, Any] | None = None) -> ResearchStep:
         run = self._get_run(run_id)
         step = self._get_step(run, step_key)
-        if step.status != "running":
+        # ReAct 下 start_step 已把步骤置 running；宽容幂等：重复 complete 覆盖输出
+        if step.status not in {"running", "completed"}:
             raise ValueError(f"step {step_key} is not running")
         step.status = "completed"
         step.output_data = output or {}

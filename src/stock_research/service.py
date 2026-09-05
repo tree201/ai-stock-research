@@ -629,8 +629,9 @@ def recalculate_report(report_id: str, assumptions: dict[str, Any] | None = None
                 raw_text=str(citation.get("raw_text", "")),
                 confidence=float(row.get("confidence", 0.0)),
             ))
-        calculations = ResearchPipeline._calculate(facts, dcf_assumptions)
-        review = ResearchPipeline._review(facts, calculations, run.as_of_date)
+        from .pipeline_support import run_calculations, run_review
+        calculations = run_calculations(facts, dcf_assumptions)
+        review = run_review(facts, calculations, run.as_of_date)
         report = ReportBuilder().build(
             company={"symbol": project.symbol, "name": project.name, "market": project.market},
             question=run.question,

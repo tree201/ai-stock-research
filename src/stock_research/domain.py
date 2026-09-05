@@ -34,11 +34,29 @@ class RunStatus(StrEnum):
 _TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     RunStatus.CREATED: frozenset({RunStatus.PLANNED, RunStatus.CANCELED}),
     RunStatus.PLANNED: frozenset({RunStatus.COLLECTING_DATA, RunStatus.PAUSED, RunStatus.CANCELED, RunStatus.FAILED}),
-    RunStatus.COLLECTING_DATA: frozenset({RunStatus.EXTRACTING_FACTS, RunStatus.PAUSED, RunStatus.CANCELED, RunStatus.FAILED}),
-    RunStatus.EXTRACTING_FACTS: frozenset({RunStatus.ANALYZING, RunStatus.PAUSED, RunStatus.CANCELED, RunStatus.FAILED}),
-    RunStatus.ANALYZING: frozenset({RunStatus.CALCULATING, RunStatus.PAUSED, RunStatus.CANCELED, RunStatus.FAILED}),
-    RunStatus.CALCULATING: frozenset({RunStatus.REVIEWING, RunStatus.PAUSED, RunStatus.CANCELED, RunStatus.FAILED}),
-    RunStatus.REVIEWING: frozenset({RunStatus.COMPLETED, RunStatus.PAUSED, RunStatus.CANCELED, RunStatus.FAILED}),
+    # ReAct 编排允许模型决定"再收一轮资料/补抽取"，所以除 PAUSED/CANCELED/FAILED
+    # 外的任意研究态之间都可达——顺序不再由状态机锁定，由 agent 循环决定。
+    RunStatus.COLLECTING_DATA: frozenset({
+        RunStatus.EXTRACTING_FACTS, RunStatus.ANALYZING, RunStatus.CALCULATING, RunStatus.REVIEWING,
+        RunStatus.PAUSED, RunStatus.CANCELED, RunStatus.FAILED,
+    }),
+    RunStatus.EXTRACTING_FACTS: frozenset({
+        RunStatus.COLLECTING_DATA, RunStatus.ANALYZING, RunStatus.CALCULATING, RunStatus.REVIEWING,
+        RunStatus.PAUSED, RunStatus.CANCELED, RunStatus.FAILED,
+    }),
+    RunStatus.ANALYZING: frozenset({
+        RunStatus.COLLECTING_DATA, RunStatus.EXTRACTING_FACTS, RunStatus.CALCULATING, RunStatus.REVIEWING,
+        RunStatus.PAUSED, RunStatus.CANCELED, RunStatus.FAILED,
+    }),
+    RunStatus.CALCULATING: frozenset({
+        RunStatus.COLLECTING_DATA, RunStatus.EXTRACTING_FACTS, RunStatus.ANALYZING, RunStatus.REVIEWING,
+        RunStatus.PAUSED, RunStatus.CANCELED, RunStatus.FAILED,
+    }),
+    RunStatus.REVIEWING: frozenset({
+        RunStatus.COMPLETED,
+        RunStatus.COLLECTING_DATA, RunStatus.EXTRACTING_FACTS, RunStatus.ANALYZING, RunStatus.CALCULATING,
+        RunStatus.PAUSED, RunStatus.CANCELED, RunStatus.FAILED,
+    }),
     RunStatus.PAUSED: frozenset({
         RunStatus.PLANNED,
         RunStatus.COLLECTING_DATA,

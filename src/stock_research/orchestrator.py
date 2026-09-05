@@ -247,9 +247,17 @@ class ResearchTools:
                 }
                 for chunk in selected
             )
-            analysis = self.llm_provider.analyze(
-                AnalysisRequest(self.question, run.as_of_date, evidence, project.name, project.symbol)
-            )
+            try:
+                analysis = self.llm_provider.analyze(
+                    AnalysisRequest(self.question, run.as_of_date, evidence, project.name, project.symbol)
+                )
+            except LLMError as exc:
+                # 内容风控/供应商临时故障不应炸掉整轮研究：降级为观察，
+                # 模型可基于已抽取的事实继续 review + compile_report。
+                if self.workflow.store:
+                    self.workflow.store.save_claims(self.run_id, [])
+                self.workflow.complete_step(self.run_id, "analyze_business", {"llm_claim_count": 0, "llm_error": str(exc)})
+                return Observation("analyze_business", args, f"LLM 业务分析调用失败：{exc}。可跳过定性分析，基于已抽取的财务事实继续后续步骤。")
             self.usage = analysis.usage
             self.llm_claims = [
                 {"category": claim.category, "text": claim.text, "evidence_ids": list(claim.evidence_ids), "confidence": claim.confidence, "counter_evidence_ids": list(claim.counter_evidence_ids), "provider": analysis.provider, "model": analysis.model}

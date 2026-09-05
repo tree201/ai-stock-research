@@ -1487,8 +1487,9 @@ export default function App() {
               <button
                 type="button"
                 onClick={() => {
-                  if (/资料|来源|白名单|登记/.test(error)) {
-                    // 资料类错误引导到「公司详情 → 资料」，模型配置错误才进设置。
+                  if (/风控|Content Exists Risk|资料|来源|白名单|登记/.test(error)) {
+                    // 资料类/内容风控错误引导到「公司详情 → 资料」（换资料来源），
+                    // 模型配置错误才进设置。
                     setPanelTab("sources");
                     setPanelOpen(true);
                   } else {
@@ -1496,7 +1497,7 @@ export default function App() {
                   }
                 }}
               >
-                {/资料|来源|白名单|登记/.test(error) ? "打开公司资料" : "打开模型设置"}
+                {/风控|Content Exists Risk|资料|来源|白名单|登记/.test(error) ? "打开公司资料" : "打开模型设置"}
               </button>
             </div>
           )}

@@ -183,6 +183,40 @@ class HardGateTests(TestCase):
         self.assertIn("没有抽取到财务事实", observation.text)
 
 
+class LLMOutageResilienceTests(TestCase):
+    """analyze 撞内容风控/供应商故障时降级继续，不炸整轮研究。"""
+
+    def setUp(self) -> None:
+        self.workflow = ResearchWorkflow()
+        project_cls = __import__("stock_research", fromlist=["ResearchProject"]).ResearchProject
+        self.project = self.workflow.create_project(
+            project_cls(user_id=uuid4(), company_id=uuid4(), symbol="01113", name="长实集团")
+        )
+        self.run = self.workflow.create_run(self.project.id, "研究长实", date(2025, 12, 31))
+        self.workflow.plan(self.run.id)
+
+    def test_analyze_llm_failure_degrades_and_run_still_reports(self) -> None:
+        from stock_research.llm import LLMError as _LLMError
+
+        class BlockedProvider(HeuristicLLMProvider):
+            """chat_json 正常（编排循环可用），analyze 被风控拦截。"""
+
+            def analyze(self, request):
+                raise _LLMError("LLM request failed: Content Exists Risk")
+
+        tools = _tools_with_documents(self.workflow, self.run.id)
+        tools.llm_provider = BlockedProvider()
+        outcome = run_research(HeuristicOrchestratorProvider(), "长实集团", "01113", "研究长实", tools)
+        self.assertIsNotNone(outcome["report"], "analyze 被风控拦截后研究仍应产出报告骨架")
+        degrade = next(step for step in outcome["steps"] if step["tool"] == "analyze_business" and "Content Exists Risk" in step["observation"])
+        self.assertIsNotNone(degrade)
+        finished = self.workflow.runs[self.run.id]
+        self.assertEqual(finished.status.value, "reviewing")
+        analyze_step = next(step for step in finished.steps if step.step_key == "analyze_business")
+        self.assertEqual(analyze_step.status, "completed")
+        self.assertIn("llm_error", analyze_step.output_data)
+
+
 class _Scripted:
     """按脚本回放决策的假 provider，用于测乱序路径。"""
 

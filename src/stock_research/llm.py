@@ -19,6 +19,23 @@ class LLMError(RuntimeError):
     """Raised when a provider cannot return a valid structured response."""
 
 
+def http_error_detail(exc: Exception) -> str:
+    """Extract the provider's error body from an HTTPError (e.g. DeepSeek
+    returns {"error":{"message":"Content Exists Risk"}} with HTTP 400 —
+    without this the user only sees "Bad Request" and cannot tell a content
+    block from a config problem)."""
+    body = getattr(exc, "read", None)
+    if body is None:
+        return str(exc)
+    try:
+        raw = body().decode("utf-8", "replace")
+        data = json.loads(raw)
+        message = data.get("error", {}).get("message") if isinstance(data, dict) else None
+        return str(message) if message else raw[:300]
+    except Exception:
+        return str(exc)
+
+
 class ModelNotConfiguredError(LLMError):
     """Raised when a production request has no configured real model."""
 
@@ -167,7 +184,7 @@ class OpenAICompatibleProvider:
             with self._opener(req, timeout=self.timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
         except Exception as exc:
-            raise LLMError(f"LLM request failed: {exc}") from exc
+            raise LLMError(f"LLM request failed: {http_error_detail(exc)}") from exc
         try:
             content = body["choices"][0]["message"]["content"]
             decoded = json.loads(content) if isinstance(content, str) else content
@@ -215,7 +232,7 @@ class OpenAICompatibleProvider:
                 raise ValueError("empty answer")
             return content.strip()
         except Exception as exc:
-            raise LLMError(f"LLM follow-up failed: {exc}") from exc
+            raise LLMError(f"LLM follow-up failed: {http_error_detail(exc)}") from exc
 
     def answer_with_search(self, question: str, search_results: list[dict[str, str]], report_context: str = "", company_name: str = "", company_symbol: str = "") -> str:
         """Answer a follow-up using web search snippets plus report context."""
@@ -284,7 +301,7 @@ class OpenAICompatibleProvider:
         except LLMError:
             raise
         except Exception as exc:
-            raise LLMError(f"LLM chat_json failed: {exc}") from exc
+            raise LLMError(f"LLM chat_json failed: {http_error_detail(exc)}") from exc
 
     @staticmethod
     def _parse_claim(raw: dict[str, Any], evidence: Iterable[dict[str, str]]) -> AnalysisClaim:

@@ -9,6 +9,7 @@ from uuid import uuid4, UUID
 
 from stock_research.documents import DocumentIngestor, RawDocument
 from stock_research.domain import ResearchProject
+from stock_research.facts import FinancialFactExtractor
 from stock_research.jobs import execute_research_job, recover_stuck_jobs
 from stock_research.llm import AnalysisClaim, AnalysisRequest, AnalysisResponse, HeuristicLLMProvider, LLMError
 from stock_research.pipeline import ResearchPipeline
@@ -115,35 +116,38 @@ class PipelineResumeTests(unittest.TestCase):
                 content=DOCUMENT_TEXT,
             )
 
-            with self.assertRaises(LLMError):
-                pipeline.run(
-                    project_id=project.id,
-                    question="研究公司",
-                    as_of_date=date(2025, 12, 31),
-                    documents=[document],
-                )
-            interrupted = next(iter(pipeline.workflow.runs.values()))
-            completed_steps = {step.step_key for step in interrupted.steps if step.status == "completed"}
-            self.assertEqual(completed_steps, {"collect_filings", "extract_financials"})
-            self.assertEqual(pipeline.ingestor.calls, 1)
+            # 模拟一次进程中断留下的非终态 run：collect + extract 已完成并落库，
+            # 其余步骤 pending。ReAct 下 LLM 故障已被降级吸收，不再炸掉整轮，
+            # 因此中断用"进程死亡"来模拟，这正是 resume 的真实场景。
+            run = pipeline.workflow.create_run(project.id, "研究公司", date(2025, 12, 31))
+            pipeline.workflow.plan(run.id)
+            chunks = DocumentIngestor().chunk_many([document])
+            pipeline.workflow.start_step(run.id, "collect_filings")
+            store.save_documents(run.id, [document])
+            store.save_evidence_chunks(chunks)
+            pipeline.workflow.complete_step(run.id, "collect_filings", {"document_count": 1, "evidence_count": len(chunks)})
+            facts = FinancialFactExtractor().extract(chunks)
+            pipeline.workflow.start_step(run.id, "extract_financials")
+            store.save_facts(run.id, facts)
+            pipeline.workflow.complete_step(run.id, "extract_financials", {"fact_count": len(facts)})
 
             report = pipeline.run(
                 project_id=project.id,
                 question="研究公司",
                 as_of_date=date(2025, 12, 31),
                 documents=[document],
-                resume_run_id=interrupted.id,
+                resume_run_id=run.id,
             )
-            self.assertEqual(report["run_id"], str(interrupted.id))
-            self.assertTrue(report["llm_claims"])
-            self.assertGreaterEqual(len(report["facts"]), 2)
+            self.assertEqual(report["run_id"], str(run.id))
             self.assertIn("markdown", report)
-            # No re-download: collection ran exactly once across both attempts.
-            self.assertEqual(pipeline.ingestor.calls, 1)
-            # Model was called once per attempt: the failed one and the retry.
-            self.assertEqual(flaky.calls, 2)
+            # No re-download: collection was resumed from the checkpoint, so the
+            # counting ingestor is never invoked across the resumed attempt.
+            self.assertEqual(pipeline.ingestor.calls, 0)
+            # analyze 被降级吸收（flaky 第一次调用即失败）→ claims 为空，报告骨架照常产出
+            self.assertEqual(flaky.calls, 1)
+            self.assertEqual(report["llm_claims"], [])
 
-            finished = store.load_run(interrupted.id)
+            finished = store.load_run(run.id)
             self.assertEqual(finished.status.value, "completed")
             self.assertTrue(all(step.status == "completed" for step in finished.steps))
         finally:

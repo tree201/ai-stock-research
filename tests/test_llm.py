@@ -1,6 +1,8 @@
 from datetime import date
+from io import BytesIO
 import json
 import unittest
+import urllib.error
 
 from stock_research.llm import AnalysisRequest, DeepSeekProvider, HeuristicLLMProvider, LLMError, OpenAICompatibleProvider
 
@@ -12,6 +14,19 @@ class _Response:
     def __enter__(self): return self
     def __exit__(self, *_args): return False
     def read(self): return self.payload
+
+
+class _HttpErrorResponse:
+    """urlopen double that raises HTTPError carrying a JSON error body."""
+
+    def __init__(self, status: int, body: dict):
+        self._error = urllib.error.HTTPError(
+            "https://example.test/v1/chat/completions", status, "Bad Request", {},
+            BytesIO(json.dumps(body).encode("utf-8")),
+        )
+
+    def __call__(self, *_args, **_kwargs):
+        raise self._error
 
 
 class LLMTests(unittest.TestCase):
@@ -37,6 +52,17 @@ class LLMTests(unittest.TestCase):
         provider = OpenAICompatibleProvider("https://example.test/v1", "key", "model", opener=lambda *_args, **_kwargs: _Response(invalid))
         with self.assertRaises(LLMError):
             provider.analyze(AnalysisRequest("研究公司", date(2025, 12, 31), ({"evidence_id": "e1", "text": "Cloud growth"},)))
+
+    def test_http_error_body_is_surfaced_in_llm_error(self) -> None:
+        """供应商 400 的响应体（如 DeepSeek 内容风控）必须透传，不能只给 Bad Request。"""
+        provider = OpenAICompatibleProvider(
+            "https://example.test/v1", "key", "model",
+            opener=_HttpErrorResponse(400, {"error": {"message": "Content Exists Risk", "type": "invalid_request_error"}}),
+        )
+        with self.assertRaises(LLMError) as ctx:
+            provider.analyze(AnalysisRequest("研究公司", date(2025, 12, 31), ({"evidence_id": "e1", "text": "Cloud growth"},)))
+        self.assertIn("Content Exists Risk", str(ctx.exception))
+        self.assertNotIn("Bad Request", str(ctx.exception))
 
     def test_deepseek_provider_uses_official_compatible_base_url(self) -> None:
         provider = DeepSeekProvider("key")

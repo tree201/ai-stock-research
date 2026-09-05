@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import { dismissOnboarding } from "./support/onboarding";
 
 /**
  * Composer 底栏布局验收（对照 Trae 输入框）：
@@ -8,6 +9,7 @@ import { test, expect } from "@playwright/test";
 
 test("approval pill sits bottom-left, model pill bottom-right of composer", async ({ page }) => {
   await page.goto("/");
+  await dismissOnboarding(page);
   const approval = page.locator(".composer .approval-trigger");
   const model = page.locator(".composer .model-picker .picker-trigger");
   const send = page.locator(".composer .send");

@@ -80,6 +80,11 @@
 .appearance-swatch-dark { background:linear-gradient(160deg,#1d2422 55%,#141715 55%); }
 /* 新研究弹窗复用 .settings-dialog 外壳，但内容是普通表单流，需覆盖双栏 flex 布局 */
 .new-research-dialog { display:block; height:auto; max-height:min(520px,calc(100vh - 40px)); max-height:min(520px,calc(100dvh - 40px)); padding:20px; overflow:auto; }
+/* 设置 → 外观：公司名称显示偏好行（标签左、控件右，走 Orca 卡片行布局） */
+.display-pref-row { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+.display-pref-copy { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.display-pref-copy strong { font-size:13px; color:var(--ink); }
+.display-pref-copy small { font-size:12px; line-height:17px; color:var(--ink-muted); }
 .model-settings-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:17px; }
 .model-settings-heading h2 { margin:0; color:var(--ink-strong); font-size:18px; }
 .new-research-label { display:flex; flex-direction:column; gap:8px; margin:0; color:var(--ink-soft); font-size:12px; }

@@ -1,7 +1,8 @@
-export type Company = { id: string; project_ids?: string[]; name: string; symbol: string; market: string; latest_event_preview?: string; session_count: number };
-export type CompanyCatalogEntry = { name: string; symbol: string; market: string };
+export type NameDisplayPref = "zh" | "en" | "bilingual";
+export type Company = { id: string; project_ids?: string[]; name: string; name_en?: string; name_zh?: string | null; symbol: string; market: string; latest_event_preview?: string; session_count: number };
+export type CompanyCatalogEntry = { name: string; name_zh?: string | null; symbol: string; market: string };
 export type Session = { id: string; project_id: string; title: string; status: string; latest_event_at: string; last_event_preview?: string };
-export type SearchResult = { session: Session; company: { id: string; name: string; symbol: string; market: string } ; matched_text?: string };
+export type SearchResult = { session: Session; company: { id: string; name: string; name_zh?: string | null; symbol: string; market: string } ; matched_text?: string };
 export type Message = { id: string; role: string; message_type: string; content: { text?: string; summary?: string[]; report_id?: string }; created_at: string };
 export type RunStep = { step_key: string; order: number; status: string; attempt: number; output?: Record<string, unknown> };
 export type Run = { id: string; status: string; question: string; as_of_date: string; steps?: RunStep[] };
@@ -52,6 +53,7 @@ export const api = {
   discoverLlmModels: (payload: { provider_id?: number; base_url?: string; api_key?: string }) => request<{ models: { model_id: string; added: boolean }[] }>('/api/llm/models/discover', { method: 'POST', body: JSON.stringify(payload) }),
   setLlmSelection: (payload: { model_row_id: number; level?: string }) => request<{ ok: boolean; config: LlmConfig }>('/api/llm/selection', { method: 'POST', body: JSON.stringify(payload) }),
   setLlmApproval: (mode: ApprovalMode) => request<{ ok: boolean; config: LlmConfig }>('/api/llm/approval', { method: 'POST', body: JSON.stringify({ mode }) }),
+  setDisplayNamePref: (display: NameDisplayPref) => request<{ ok: boolean; company_name_display: NameDisplayPref }>('/api/settings/display', { method: 'POST', body: JSON.stringify({ display }) }),
 };
 
 export type LlmProvider = { id: number; route: string; name: string; protocol: string; base_url: string; has_api_key: boolean; builtin: number; enabled: number };
@@ -65,12 +67,24 @@ export type ApprovalMode = "manual" | "auto" | "full";
 export const APPROVAL_LABELS: Record<ApprovalMode, string> = { manual: "手动审批", auto: "自动审批", full: "完全访问" };
 
 export type ChatResult = { type: string; session_id: string; message?: string; report?: Report; job_id?: string; run_id?: string; report_id?: string };
-export type ModelSettings = { provider: string; base_url: string; model: string; api_key?: string; llm_enabled?: boolean; api_key_configured?: boolean };
+export type ModelSettings = { provider: string; base_url: string; model: string; api_key?: string; llm_enabled?: boolean; api_key_configured?: boolean; company_name_display?: NameDisplayPref };
 export type Quote = { available: boolean; symbol: string; delayed: boolean; currency?: string; last?: number; change?: number | null; change_pct?: number | null; high_52w?: number; low_52w?: number; as_of?: string };
 export type PanelSource = { id: string; url: string; title?: string | null; created_at: string; source_class?: string | null };
 export type PanelDocument = { id: string; source_type: string; source_url: string; title: string; published_at?: string | null; source_class?: string | null; trust?: string | null };
 export type PanelReport = { id: string; run_id: string; version: number; created_at: string; run_status?: string; question?: string };
-export type CompanyPanel = { available: boolean; project?: { id: string; name: string; symbol: string; market: string }; sources?: PanelSource[]; documents?: PanelDocument[]; reports?: PanelReport[] };
+export type CompanyPanel = { available: boolean; project?: { id: string; name: string; name_zh?: string | null; symbol: string; market: string }; sources?: PanelSource[]; documents?: PanelDocument[]; reports?: PanelReport[] };
+
+/** 按全局偏好计算公司显示名；缺失时回退另一语言名，最后回退代码。 */
+export function fmtName(company: { name: string; name_zh?: string | null; symbol?: string }, pref: NameDisplayPref): string {
+  const zh = company.name_zh?.trim();
+  const en = company.name?.trim();
+  if (pref === "en") return en || zh || company.symbol || "";
+  if (pref === "bilingual") {
+    if (zh && en && zh !== en) return `${zh} · ${en}`;
+    return zh || en || company.symbol || "";
+  }
+  return zh || en || company.symbol || "";
+}
 export type NewsItem = { title: string; url: string; source?: string; time?: string | null; external?: boolean; trust?: string | null };
 export type TrustedHost = { id: number; host: string; label?: string | null; created_at: string };
 export type TrustedHostList = { hosts: TrustedHost[] };

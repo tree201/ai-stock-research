@@ -191,6 +191,9 @@ class SQLiteStore:
             self.connection.execute("ALTER TABLE llm_models ADD COLUMN context_window INTEGER")
         if "max_tokens" not in model_columns:
             self.connection.execute("ALTER TABLE llm_models ADD COLUMN max_tokens INTEGER")
+        project_columns = {row["name"] for row in self.connection.execute("PRAGMA table_info(projects)").fetchall()}
+        if "name_zh" not in project_columns:
+            self.connection.execute("ALTER TABLE projects ADD COLUMN name_zh TEXT")
         self._migrate_llm_providers_route()
         self._backfill_document_trust()
         self._seed_trusted_hosts()
@@ -527,10 +530,11 @@ class SQLiteStore:
 
     def save_project(self, project: ResearchProject) -> None:
         self.connection.execute(
-            """INSERT INTO projects (id,user_id,company_id,symbol,name,market,title,created_at,updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(id) DO UPDATE SET name=excluded.name, title=excluded.title, updated_at=excluded.updated_at""",
-            (str(project.id), str(project.user_id), str(project.company_id), project.symbol, project.name, project.market, project.title, _dt(project.created_at), _dt(project.updated_at)),
+            """INSERT INTO projects (id,user_id,company_id,symbol,name,market,name_zh,title,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET name=excluded.name, title=excluded.title, updated_at=excluded.updated_at,
+                   name_zh=COALESCE(excluded.name_zh, projects.name_zh)""",
+            (str(project.id), str(project.user_id), str(project.company_id), project.symbol, project.name, project.market, project.name_zh, project.title, _dt(project.created_at), _dt(project.updated_at)),
         )
         self.connection.commit()
         self.set_project_tags(project.id, project.tags)
@@ -888,7 +892,7 @@ class SQLiteStore:
             return None
         return ResearchProject(
             user_id=UUID(row["user_id"]), company_id=UUID(row["company_id"]), symbol=row["symbol"],
-            name=row["name"], market=row["market"], id=UUID(row["id"]), title=row["title"],
+            name=row["name"], market=row["market"], name_zh=row["name_zh"], id=UUID(row["id"]), title=row["title"],
             tags=self.list_project_tags(UUID(row["id"])),
             created_at=datetime.fromisoformat(row["created_at"]), updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -899,10 +903,23 @@ class SQLiteStore:
             raise KeyError(f"unknown project: {project_id}")
         return ResearchProject(
             user_id=UUID(row["user_id"]), company_id=UUID(row["company_id"]), symbol=row["symbol"],
-            name=row["name"], market=row["market"], id=UUID(row["id"]), title=row["title"],
+            name=row["name"], market=row["market"], name_zh=row["name_zh"], id=UUID(row["id"]), title=row["title"],
             tags=self.list_project_tags(UUID(row["id"])),
             created_at=datetime.fromisoformat(row["created_at"]), updated_at=datetime.fromisoformat(row["updated_at"]),
         )
+
+    def backfill_name_zh(self, mapping: dict[str, str]) -> int:
+        """为缺失中文名的 HK 公司按 symbol 回填；返回更新行数。"""
+        updated = 0
+        for row in self.connection.execute(
+            "SELECT id, symbol FROM projects WHERE market='HK' AND (name_zh IS NULL OR name_zh='')"
+        ).fetchall():
+            zh = mapping.get("".join(ch for ch in row["symbol"] if ch.isdigit()).zfill(5))
+            if zh:
+                self.connection.execute("UPDATE projects SET name_zh=? WHERE id=?", (zh, row["id"]))
+                updated += 1
+        self.connection.commit()
+        return updated
 
     def list_runs(self, project_id: UUID | None = None, session_id: UUID | None = None) -> list[dict[str, Any]]:
         if session_id:

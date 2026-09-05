@@ -13,6 +13,7 @@ from .documents import RawDocument
 from .domain import ResearchProject
 from .pipeline import ResearchPipeline
 from .llm import DeepSeekProvider, OpenAICompatibleProvider, provider_from_env
+from .service import backfill_company_names
 from .storage import SQLiteStore
 from .workflow import ResearchWorkflow
 from .web import serve
@@ -58,6 +59,7 @@ def main() -> int:
     if args.web:
         if args.db:
             os.environ["AI_STOCK_DB"] = args.db
+        backfill_company_names()  # 启动时 best-effort 补全缺失的公司中文名
         serve(port=args.port)
         return 0
     if not args.demo and not args.document:

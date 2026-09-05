@@ -35,6 +35,7 @@ from .service import (
     run_research_payload,
     save_llm_provider_payload,
     set_approval_mode_payload,
+    set_display_preference_payload,
     set_llm_selection_payload,
     set_session_status,
 )
@@ -186,7 +187,7 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
-        if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/projects", "/api/trusted-hosts", "/api/llm/providers", "/api/llm/models", "/api/llm/models/discover", "/api/llm/models/batch", "/api/llm/selection", "/api/llm/approval"} and not self.path.startswith(("/api/projects/", "/api/sessions/", "/api/company-panel", "/api/reports/", "/api/llm/providers/")):
+        if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/settings/display", "/api/projects", "/api/trusted-hosts", "/api/llm/providers", "/api/llm/models", "/api/llm/models/discover", "/api/llm/models/batch", "/api/llm/selection", "/api/llm/approval"} and not self.path.startswith(("/api/projects/", "/api/sessions/", "/api/company-panel", "/api/reports/", "/api/llm/providers/")):
             self._send(404, b'{"error":"not found"}', "application/json")
             return
         try:
@@ -196,6 +197,8 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length).decode("utf-8"))
             if self.path == "/api/settings":
                 response = configure_provider(payload)
+            elif self.path == "/api/settings/display":
+                response = set_display_preference_payload(payload)
             elif self.path == "/api/projects":
                 response = create_project_with_session(payload)
             elif self.path.startswith("/api/sessions/") and self.path.endswith("/messages"):

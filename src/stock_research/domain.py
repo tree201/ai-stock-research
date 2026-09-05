@@ -62,6 +62,7 @@ class ResearchProject:
     symbol: str
     name: str
     market: str = "HK"
+    name_zh: str | None = None
     id: UUID = field(default_factory=uuid4)
     title: str | None = None
     tags: list[str] = field(default_factory=list)

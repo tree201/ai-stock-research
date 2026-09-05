@@ -78,6 +78,8 @@
 .appearance-swatch { width:100%; height:44px; border-radius:8px; border:1px solid var(--line); }
 .appearance-swatch-light { background:linear-gradient(160deg,#f8f9f6 55%,#1d2422 55%); }
 .appearance-swatch-dark { background:linear-gradient(160deg,#1d2422 55%,#141715 55%); }
+/* 新研究弹窗复用 .settings-dialog 外壳，但内容是普通表单流，需覆盖双栏 flex 布局 */
+.new-research-dialog { display:block; height:auto; max-height:min(520px,calc(100vh - 40px)); max-height:min(520px,calc(100dvh - 40px)); padding:20px; overflow:auto; }
 .model-settings-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:17px; }
 .model-settings-heading h2 { margin:0; color:var(--ink-strong); font-size:18px; }
 .new-research-label { display:flex; flex-direction:column; gap:8px; margin:0; color:var(--ink-soft); font-size:12px; }
@@ -180,7 +182,7 @@ body.is-resizing { cursor:col-resize; user-select:none; -webkit-user-select:none
 .report-panel-heading { background:var(--surface); border-bottom-color:var(--line); }
 .report-card { border-color:#dfe6e1; box-shadow:0 4px 18px #20342b08; }
 .progress-card { border-color:#cce8de; background:#f3fbf7; }
-.new-research-dialog { width:min(470px,100%); height:min(520px,calc(100vh - 40px)); height:min(520px,calc(100dvh - 40px)); }
+.new-research-dialog { width:min(470px,100%); }
 .model-settings-heading { margin-bottom:20px; }
 .model-settings-heading h2 { margin:0; font-family:Georgia,"Times New Roman",serif; font-size:23px; }
 .new-research-select { width:100%; }

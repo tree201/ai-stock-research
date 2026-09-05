@@ -105,12 +105,13 @@ class ResearchWorkflow:
     def plan(self, run_id: UUID, steps: tuple[tuple[str, str], ...] = DEFAULT_STEPS) -> ResearchRun:
         run = self._get_run(run_id)
         run.transition(RunStatus.PLANNED)
+        replanned = run.plan_version > 0
         run.plan_version += 1
         run.steps = [
             ResearchStep(run_id=run.id, step_key=key, order=index, input_data={"purpose": purpose})
             for index, (key, purpose) in enumerate(steps, start=1)
         ]
-        self._emit(run, "run/planned", {"plan_version": run.plan_version, "steps": [step.step_key for step in run.steps]})
+        self._emit(run, "run/replanned" if replanned else "run/planned", {"plan_version": run.plan_version, "steps": [step.step_key for step in run.steps]})
         return run
 
     def start_step(self, run_id: UUID, step_key: str) -> ResearchStep:

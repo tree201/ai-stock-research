@@ -1,29 +1,29 @@
-"""Research orchestrator: ReAct loop over pipeline-step tools.
+"""Research tools: pipeline steps as ReAct-callable tools.
 
-固定瀑布已移除——研究路径由模型在 ReAct 循环中自主决定：先收什么资料、
-何时补抽取、要不要跑估值、何时出报告。每个管线步骤降级为可独立调用的
-工具，内部保留确定性实现与 checkpoint（complete_step 照常落库），因此
-断点续跑与 grounding 评测链路不受影响。
+固定瀑布已移除——研究路径由统一 agent 循环（agent_core.run_agent_turn）
+自主决定：先收什么资料、何时补抽取、要不要跑估值、何时出报告。每个管线
+步骤降级为可独立调用的工具，内部保留确定性实现与 checkpoint（complete_step
+照常落库），因此断点续跑与 grounding 评测链路不受影响。
 
 两个不可让渡的硬门禁（见 ResearchTools.run）：
 - calculate_valuation 的算术必须走工具，模型不得心算；
 - compile_report 出报告前必须已通过 review 门禁。
 
-无 LLM 时由调用方传入脚本 provider（HeuristicOrchestratorProvider），
-按固定顺序驱动同一循环，保证无 key 开发与测试的确定性。
+ReAct 主循环本身住在 agent_core.py；本模块只保留工具外壳
+（ResearchTools）与无 LLM 时的脚本 provider（HeuristicOrchestratorProvider）。
 """
 
 from __future__ import annotations
 
-from datetime import date
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import UUID
 
+from .agent_core import UnifiedTools, run_agent_turn
 from .calculations import CalculationResult
 from .context import ContextBuilder
 from .documents import DocumentIngestor, EvidenceChunk, RawDocument
 from .facts import FactCandidate, FinancialFactExtractor
-from .llm import AnalysisRequest, LLMError, LLMProvider, identity_directive
+from .llm import AnalysisRequest, LLMError, LLMProvider
 from .pipeline_support import (
     ToolError,
     chunk_from_row,
@@ -50,13 +50,8 @@ STEP_HINTS = {
 }
 
 
-class Observation:
-    """一次步骤调用的结构化结果，text 面向模型。"""
-
-    def __init__(self, tool: str, args: dict[str, Any], text: str) -> None:
-        self.tool = tool
-        self.args = args
-        self.text = text
+# 统一 Observation 类型住在 tools.py（CompanyTools 同源），此处不再重复定义。
+from .tools import Observation as Observation  # re-export for backwards imports
 
 
 class ResearchTools:
@@ -219,7 +214,12 @@ class ResearchTools:
             self.workflow.store.save_documents(run.id, new_documents)
             self.workflow.store.save_evidence_chunks(new_chunks)
         self.workflow.complete_step(self.run_id, "collect_filings", {"document_count": len(new_documents), "evidence_count": len(new_chunks)})
-        return Observation("collect_filings", args, f"已收录 {len(new_documents)} 篇新资料，切出 {len(new_chunks)} 个证据块（累计 {len(self.chunks)} 块）。")
+        citations = self.citations_for()[:8]
+        return Observation(
+            "collect_filings", args,
+            f"已收录 {len(new_documents)} 篇新资料，切出 {len(new_chunks)} 个证据块（累计 {len(self.chunks)} 块）。",
+            citations,
+        )
 
     def extract_financials(self, args: dict[str, Any]) -> Observation:
         self.workflow.start_step(self.run_id, "extract_financials")
@@ -314,34 +314,24 @@ class ResearchTools:
         )
         self.report = report
         self.workflow.complete_step(self.run_id, "compile_report", {"report_ready": True})
-        return Observation("compile_report", args, "研究报告已生成。")
+        return Observation("compile_report", args, "研究报告已生成。", self.citations_for()[:8])
 
-
-_ORCHESTRATOR_PROTOCOL = (
-    "你是严谨的股票研究编排者，通过调用研究步骤工具完成一次公司研究。每轮只输出一个 JSON 对象：\n"
-    '调用步骤：{"thought":"简短理由","action":"<步骤名>","args":{}}\n'
-    '结束研究：{"thought":"简短理由","action":"final","answer":"面向用户的中文总结"}\n'
-    "规则：\n"
-    "1. 按公司情况自适应规划路径：金融股可跳过 DCF，资料不足可再次 collect_filings；\n"
-    "2. 数值计算必须走 calculate_valuation 工具，禁止心算；\n"
-    "3. compile_report 必须最后调用，且必须先通过 review；\n"
-    "4. compile_report 成功后立即 final，不要重复调用已完成步骤。"
-)
-
-
-def _ask(provider: Any, system: str, user: str, attempts: int = 3) -> dict[str, Any]:
-    """带重试的编排决策调用：供应商瞬时空响应/网络抖动不应炸掉整轮研究。
-
-    每轮决策是无状态单轮调用（transcript 全量随 prompt 重发），重试幂等。
-    """
-    last: Exception | None = None
-    for _ in range(attempts):
-        try:
-            decision = provider.chat_json(system, user)
-            return decision if isinstance(decision, dict) else {}
-        except LLMError as exc:
-            last = exc
-    raise LLMError(f"编排循环连续 {attempts} 次调用模型失败：{last}")
+    def citations_for(self) -> list[dict[str, Any]]:
+        """从 evidence_sources 汇总来源引用（统一循环的 citations 语义）。"""
+        citations: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for source in self.evidence_sources.values():
+            url = str(source.get("source_url", ""))
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            citations.append({
+                "ref": f"E{len(citations) + 1}",
+                "title": source.get("source_title") or url,
+                "url": url,
+                "trust": source.get("trust") or "unverified",
+            })
+        return citations
 
 
 def run_research(
@@ -352,43 +342,22 @@ def run_research(
     tools: ResearchTools,
     max_steps: int = 16,
 ) -> dict[str, Any]:
-    """ReAct 主循环：模型自主决定步骤顺序，返回 {answer, steps, report}。"""
-    identity = identity_directive(project_name, project_symbol)
-    system = f"{_ORCHESTRATOR_PROTOCOL}\n{identity}"
-    transcript = ""
-    steps: list[dict[str, Any]] = []
-    for step_index in range(max_steps):
-        user = (
-            f"可用步骤：\n{tools.catalog()}\n\n"
-            f"研究问题：{question}\n\n"
-            + (f"已完成步骤：\n{transcript}\n" if transcript else "（尚未开始）\n")
-            + ("步数已达上限：若报告未生成请先 review 再 compile_report，然后立即 final。" if step_index == max_steps - 1 else "请输出下一轮 JSON。")
-        )
-        decision = _ask(provider, system, user)
-        action = str(decision.get("action", ""))
-        if action == "final":
-            return _finalize(decision, steps, tools)
-        args = decision.get("args")
-        args = args if isinstance(args, dict) else {}
-        observation = tools.run(action, args)
-        ref = f"S{len(steps) + 1}"
-        steps.append({"ref": ref, "tool": action, "thought": str(decision.get("thought", "")), "observation": observation.text})
-        transcript += f"[{ref}] {action}：{observation.text}\n"
-    decision = _ask(provider, system, f"可用步骤：\n{tools.catalog()}\n\n研究问题：{question}\n\n已完成：\n{transcript}\n请立即结束（final）。")
-    return _finalize(decision, steps, tools)
+    """旧编排入口：薄包装到统一 agent 循环（research_only 模式）。
 
+    仅保留给 pipeline.run 与既有测试；返回 dict 形状 {answer, steps, report}
+    与旧契约一致。新代码请直接使用 agent_core.run_agent_turn。
+    """
 
-def _finalize(decision: dict[str, Any], steps: list[dict[str, Any]], tools: ResearchTools) -> dict[str, Any]:
-    answer = str(decision.get("answer", "")).strip()
-    if tools.report is None:
-        review = tools.review
-        if review is not None and review.get("status") == "needs_review":
-            # 资料质量问题走 ValueError（与旧管线契约一致，提示用户补资料），
-            # 而非 LLMError（那是模型调用失败）。
-            issues = "；".join(str(issue) for issue in review.get("issues", []))
-            raise ValueError(f"research review failed: {issues}")
-        raise LLMError("研究循环结束时没有生成报告")
-    return {"answer": answer, "steps": steps, "report": tools.report}
+    class _ProjectStub:
+        name = project_name
+        symbol = project_symbol
+
+    unified = UnifiedTools(None, lambda _q: tools, research_only=True)
+    outcome = run_agent_turn(provider, _ProjectStub(), question, unified, max_steps=max_steps)
+    result: dict[str, Any] = {"answer": outcome.answer, "steps": outcome.steps}
+    if outcome.report is not None:
+        result["report"] = outcome.report
+    return result
 
 
 class HeuristicOrchestratorProvider:

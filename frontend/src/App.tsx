@@ -585,7 +585,10 @@ export default function App() {
     applyTheme(theme);
     localStorage.setItem("theme", theme);
   }, [theme]);
-  const { modal } = AntdApp.useApp();
+  // 注意：不能在渲染 <AntdApp> 的同一组件里调 AntdApp.useApp()——hook 执行时
+  // 尚在其 context 之外，modal 上没有 confirm（移除确认弹窗会静默报错）。
+  // Modal.useModal() 可独立工作，contextHolder 需挂进组件树以继承主题。
+  const [modal, modalContextHolder] = Modal.useModal();
   const [companies, setCompanies] = useState<Company[]>([]);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarWidth, setSidebarWidth] = useState(() =>
@@ -1310,6 +1313,7 @@ export default function App() {
       }}
     >
     <AntdApp>
+    {modalContextHolder}
     <div className="app-shell" style={shellStyle}>
       <aside className={`sidebar ${sidebarCollapsed ? "is-collapsed" : ""}`}>
         <div className="workspace-switcher">

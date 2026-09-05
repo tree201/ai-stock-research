@@ -515,7 +515,12 @@ function CompanyTree({
                           label: "移除该公司",
                           danger: true,
                           icon: <Trash2 size={13} />,
-                          onClick: () => onRemoveCompany(company),
+                          // 弹层默认挂在触发节点父级（company-main 内部），
+                          // 菜单点击若不阻断会冒泡到行按钮误触 openCompany
+                          onClick: ({ domEvent }) => {
+                            domEvent.stopPropagation();
+                            onRemoveCompany(company);
+                          },
                         },
                       ],
                     }}

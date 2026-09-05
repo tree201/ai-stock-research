@@ -1484,8 +1484,19 @@ export default function App() {
           {error && (
             <div className="error-bar">
               {error}
-              <button type="button" onClick={openSettings}>
-                打开模型设置
+              <button
+                type="button"
+                onClick={() => {
+                  if (/资料|来源|白名单|登记/.test(error)) {
+                    // 资料类错误引导到「公司详情 → 资料」，模型配置错误才进设置。
+                    setPanelTab("sources");
+                    setPanelOpen(true);
+                  } else {
+                    openSettings();
+                  }
+                }}
+              >
+                {/资料|来源|白名单|登记/.test(error) ? "打开公司资料" : "打开模型设置"}
               </button>
             </div>
           )}

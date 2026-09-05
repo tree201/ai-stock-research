@@ -13,7 +13,7 @@ from stock_research.documents import FetchedDocument
 from stock_research.domain import SessionMessage
 from stock_research.llm import HeuristicLLMProvider, ModelNotConfiguredError
 from stock_research.market_data import PriceBar
-from stock_research.service import add_company_source, chat_entry_payload, chat_payload, history_payload, provider_status, recalculate_report, remove_company, remove_company_source, research_documents, resolve_provider, run_research_payload, run_update_payload
+from stock_research.service import add_company_source, chat_entry_payload, chat_payload, discover_documents, history_payload, provider_status, recalculate_report, remove_company, remove_company_source, research_documents, resolve_provider, run_research_payload, run_update_payload
 from stock_research.jobs import InlineQueue, create_and_enqueue, execute_research_job
 from stock_research.storage import SQLiteStore
 from stock_research.web_search import SearchResult
@@ -247,13 +247,15 @@ class WebMvpTests(unittest.TestCase):
                 "document": "Revenue FY2024 HK$ 100 million\nNet income FY2024 HK$ 20 million",
             }, db_path=f"{directory}/research.sqlite3")
 
-            # Same content again: nothing new to ingest.
-            with self.assertRaisesRegex(ValueError, "未检测到新资料"):
-                run_research_payload({
-                    "name": "腾讯", "symbol": "00700", "as_of_date": "2026-06-30", "question": "更新研究",
-                    "document": "Revenue FY2024 HK$ 100 million\nNet income FY2024 HK$ 20 million",
-                    "mode": "update",
-                }, db_path=f"{directory}/research.sqlite3", session_id=UUID(initial["session_id"]))
+            # Same content again: nothing new to ingest (discovery finds nothing offline).
+            with patch("stock_research.service.GoogleNewsSearch", DiscoveryTests._search_stub([])), \
+                    patch("stock_research.service.DuckDuckGoSearch", DiscoveryTests._search_stub([])):
+                with self.assertRaisesRegex(ValueError, "未检测到新资料"):
+                    run_research_payload({
+                        "name": "腾讯", "symbol": "00700", "as_of_date": "2026-06-30", "question": "更新研究",
+                        "document": "Revenue FY2024 HK$ 100 million\nNet income FY2024 HK$ 20 million",
+                        "mode": "update",
+                    }, db_path=f"{directory}/research.sqlite3", session_id=UUID(initial["session_id"]))
 
             updated = run_update_payload({
                 "name": "腾讯", "symbol": "00700", "as_of_date": "2026-06-30", "question": "更新研究",
@@ -760,3 +762,89 @@ class WebMvpTests(unittest.TestCase):
             remove_company_source(added["source"]["id"])
             panel_removed = history_payload("/api/company-panel?symbol=00700&market=HK")
             self.assertEqual(len(panel_removed["sources"]), 0)
+
+
+class DiscoveryTests(unittest.TestCase):
+    """Agent 自动找资料：无登记来源时搜索网络并按可信度取舍。"""
+
+    def setUp(self) -> None:
+        self._provider_patch = patch("stock_research.service.resolve_provider", return_value=HeuristicLLMProvider())
+        self._provider_patch.start()
+        self.addCleanup(self._provider_patch.stop)
+
+    class FakeFetcher:
+        def __init__(self, **_kwargs):
+            pass
+
+        def fetch(self, url: str) -> FetchedDocument:
+            return FetchedDocument(url, "text/html", f"<p>Revenue FY2024 HK$ 100 million ({url})</p>".encode(), datetime.now(timezone.utc))
+
+    @staticmethod
+    def _search_stub(results):
+        class Stub:
+            def __init__(self, **_kwargs):
+                pass
+
+            def search(self, query: str, max_results: int = 5):
+                return results
+        return Stub
+
+    def test_discover_prefers_whitelist_and_annotates_trust(self) -> None:
+        from stock_research.domain import ResearchProject
+        from uuid import uuid4
+        results = [
+            SearchResult(title="新闻转载", url="https://random.news.com/report", snippet="..."),
+            SearchResult(title="港交所公告", url="https://www1.hkexnews.hk/listedco/listconews/a.pdf", snippet="..."),
+        ]
+        project = ResearchProject(user_id=uuid4(), company_id=uuid4(), symbol="00700", name="腾讯")
+        with TemporaryDirectory() as directory:
+            store = SQLiteStore(f"{directory}/research.sqlite3")
+            try:
+                with patch("stock_research.service.GoogleNewsSearch", self._search_stub(results)), \
+                        patch("stock_research.service.HttpDocumentFetcher", self.FakeFetcher):
+                    documents = discover_documents(project, project.company_id, date(2025, 12, 31), store=store)
+            finally:
+                store.close()
+        self.assertEqual(documents[0].source_url, "https://www1.hkexnews.hk/listedco/listconews/a.pdf")
+        self.assertEqual(documents[0].trust, "whitelist")
+        self.assertEqual(documents[1].trust, "unverified")
+
+    def test_research_runs_on_discovered_materials_without_registered_sources(self) -> None:
+        results = [
+            SearchResult(title="业绩公告", url="https://ir.example.com/annual-results.html", snippet="..."),
+        ]
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
+            clear=False,
+        ):
+            with patch("stock_research.service.GoogleNewsSearch", self._search_stub(results)), \
+                    patch("stock_research.service.DuckDuckGoSearch", self._search_stub([])), \
+                    patch("stock_research.service.HttpDocumentFetcher", self.FakeFetcher):
+                report = run_research_payload({
+                    "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
+                }, db_path=f"{directory}/research.sqlite3")
+            self.assertEqual(report["company"]["symbol"], "00700")
+            self.assertTrue(report["markdown"])
+            # 发现的来源自动登记，供后续增量更新复用
+            store = SQLiteStore(f"{directory}/research.sqlite3")
+            try:
+                project = store.find_project("00700")
+                urls = store.list_company_source_urls(project.company_id)
+            finally:
+                store.close()
+            self.assertIn("https://ir.example.com/annual-results.html", urls)
+
+    def test_research_raises_actionable_error_when_discovery_finds_nothing(self) -> None:
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
+            clear=False,
+        ):
+            with patch("stock_research.service.GoogleNewsSearch", self._search_stub([])), \
+                    patch("stock_research.service.DuckDuckGoSearch", self._search_stub([])):
+                with self.assertRaises(ValueError) as ctx:
+                    run_research_payload({
+                        "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
+                    }, db_path=f"{directory}/research.sqlite3")
+            self.assertIn("自动检索未找到可用资料", str(ctx.exception))

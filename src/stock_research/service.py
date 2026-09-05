@@ -290,39 +290,123 @@ def research_documents(payload: dict[str, Any], company_id: UUID, as_of_date: da
                         ) from exc
                     raise
                 fetched = HttpDocumentFetcher(allowed_hosts=(), allow_any_host=True).fetch(url)
-            page_starts: tuple[int, ...] = ()
-            if fetched.content_type == "application/pdf" or fetched.body.startswith(b"%PDF"):
-                pages = pdf_extractor.extract_pages(fetched.body)
-                content_parts: list[str] = []
-                starts: list[int] = []
-                next_line = 1
-                for page in pages:
-                    starts.append(next_line)
-                    content_parts.append(page.text)
-                    next_line += len(page.text.splitlines())
-                content = "\n".join(content_parts)
-                page_starts = tuple(starts)
-            else:
-                content = extract_text(fetched)
-            if not content.strip():
-                raise ValueError(f"document contains no extractable text: {url}")
-            published_at = parse_published_at(spec.get("published_at") or fetched.last_modified)
-            host = (urlparse(url).hostname or "").lower()
-            source_class, trust = classify_document("url", url, registered_classes.get(url), checker)
-            documents.append(RawDocument(
-                company_id=company_id,
-                source_type="hkex_filing" if "hkexnews.hk" in host else "company_ir",
-                source_url=url,
-                title=spec.get("title") or Path(urlparse(url).path).name or "public filing",
-                content=content,
-                published_at=published_at,
-                language=spec.get("language"),
-                source_class=source_class,
-                trust=trust,
-                page_starts=page_starts,
-            ))
-    if not documents:
-        raise ValueError("未提供研究资料：请粘贴财报/公告文本，或在研究设置中提供公开的 HKEX/公司 IR 资料 URL。")
+            document = document_from_fetched(
+                fetched, url, company_id, as_of_date,
+                title=spec.get("title"), language=spec.get("language"),
+                registered_classes=registered_classes, checker=checker,
+            )
+            if document is not None:
+                documents.append(document)
+    return documents
+
+
+def document_from_fetched(
+    fetched: FetchedDocument,
+    url: str,
+    company_id: UUID,
+    as_of_date: date,
+    title: str | None = None,
+    language: str | None = None,
+    published_at_raw: str | None = None,
+    registered_classes: dict[str, str] | None = None,
+    checker: Any = None,
+) -> RawDocument | None:
+    """Extract text from a fetched URL document and classify its trust."""
+    pdf_extractor = PdfTextExtractor()
+    page_starts: tuple[int, ...] = ()
+    if fetched.content_type == "application/pdf" or fetched.body.startswith(b"%PDF"):
+        pages = pdf_extractor.extract_pages(fetched.body)
+        content_parts: list[str] = []
+        starts: list[int] = []
+        next_line = 1
+        for page in pages:
+            starts.append(next_line)
+            content_parts.append(page.text)
+            next_line += len(page.text.splitlines())
+        content = "\n".join(content_parts)
+        page_starts = tuple(starts)
+    else:
+        content = extract_text(fetched)
+    if not content.strip():
+        return None
+    published_at = parse_published_at(published_at_raw or fetched.last_modified)
+    host = (urlparse(url).hostname or "").lower()
+    classes = registered_classes or {}
+    trust_checker = checker or (lambda host: host_in_set(host, DEFAULT_TRUSTED_HOSTS))
+    source_class, trust = classify_document("url", url, classes.get(url), trust_checker)
+    return RawDocument(
+        company_id=company_id,
+        source_type="hkex_filing" if "hkexnews.hk" in host else "company_ir",
+        source_url=url,
+        title=title or Path(urlparse(url).path).name or "public filing",
+        content=content,
+        published_at=published_at,
+        language=language,
+        source_class=source_class,
+        trust=trust,
+        page_starts=page_starts,
+    )
+
+
+DISCOVERY_QUERY_TEMPLATES = (
+    "{name} 年报 公告",
+    "{name} annual results announcement",
+    "{symbol} 年度业绩公告 港交所",
+)
+DISCOVERY_MAX_DOCUMENTS = 3
+
+
+def discover_documents(project: ResearchProject, company_id: UUID, as_of_date: date, store: SQLiteStore | None = None) -> list[RawDocument]:
+    """Agent-driven material discovery: hunt the open web for the company's
+    filings so research never dead-ends on missing registered sources.
+
+    优先白名单来源（全局设置 + 默认 HKEX）；找不到时普通网络结果照用，
+    仅标注 [未验证来源]，由模型在推理时自行取舍。
+    """
+    queries = [
+        template.format(name=project.name, symbol=project.symbol)
+        for template in DISCOVERY_QUERY_TEMPLATES
+    ]
+    seen_urls: set[str] = set()
+    candidates: list[tuple[bool, str, str]] = []  # (whitelist_first, url, title)
+    trusted_hosts = store.trusted_hosts_set() if store is not None else DEFAULT_TRUSTED_HOSTS
+    for query in queries:
+        try:
+            results = GoogleNewsSearch().search(query, max_results=6)
+        except Exception:
+            results = []
+        if not results:
+            try:
+                results = DuckDuckGoSearch().search(query, max_results=6)
+            except Exception:
+                results = []
+        for item in results:
+            url = item.url.strip()
+            if not url.startswith(("http://", "https://")) or url in seen_urls:
+                continue
+            seen_urls.add(url)
+            candidates.append((host_in_set(url, trusted_hosts), url, item.title))
+    # 白名单来源优先，其余保序
+    candidates.sort(key=lambda entry: not entry[0])
+    registered_classes: dict[str, str] = store.company_source_classes(company_id) if store is not None else {}
+    checker = store.is_trusted_host if store is not None else (lambda host: host_in_set(host, trusted_hosts))
+    fetcher = HttpDocumentFetcher(allowed_hosts=(), allow_any_host=True)
+    documents: list[RawDocument] = []
+    for _, url, title in candidates:
+        if len(documents) >= DISCOVERY_MAX_DOCUMENTS:
+            break
+        try:
+            fetched = fetcher.fetch(url)
+            document = document_from_fetched(
+                fetched, url, company_id, as_of_date,
+                title=title or None,
+                registered_classes=registered_classes,
+                checker=checker,
+            )
+        except (DocumentFetchError, UnsupportedDocumentType, ValueError):
+            continue
+        if document is not None:
+            documents.append(document)
     return documents
 
 
@@ -386,6 +470,13 @@ def run_research_payload(payload: dict[str, Any], db_path: str | Path | None = N
             store.save_session_message(SessionMessage(session.id, "user", "text", {"text": question}))
         payload = merged_research_payload(store, project, payload)
         documents = research_documents(payload, project.company_id, as_of_date, store=store)
+        if not documents:
+            # Agent 自动找资料：不因未登记来源而拒绝研究。
+            documents = discover_documents(project, project.company_id, as_of_date, store=store)
+            for document in documents:
+                store.add_company_source(project.company_id, document.source_url, document.title, source_class="public")
+        if not documents:
+            raise ValueError("自动检索未找到可用资料：请粘贴财报/公告文本，或在「公司详情 → 资料」登记 HKEX/公司 IR 资料链接。")
         resume_raw = payload.get("_resume_run_id")
         resume_run_id = UUID(str(resume_raw)) if resume_raw else None
         report = pipeline.run(
@@ -442,7 +533,14 @@ def run_update_payload(payload: dict[str, Any], db_path: str | Path | None = Non
         seen_hashes = store.list_seen_content_hashes(project.company_id)
         new_documents = [document for document in documents if document.content_hash not in seen_hashes]
         if not new_documents:
-            raise ValueError("未检测到新资料：登记源中没有上次研究之后的新文档；可先在「公司档案 → 资料」登记新的公告链接，或粘贴新的财报文本。")
+            # 无新增时也让 agent 主动找一轮新资料，而不是直接拒绝。
+            discovered = discover_documents(project, project.company_id, as_of_date, store=store)
+            fresh = [document for document in discovered if document.content_hash not in seen_hashes]
+            for document in fresh:
+                store.add_company_source(project.company_id, document.source_url, document.title, source_class="public")
+            new_documents = fresh
+        if not new_documents:
+            raise ValueError("未检测到新资料：登记源中没有上次研究之后的新文档；可先在「公司详情 → 资料」登记新的公告链接，或粘贴新的财报文本。")
 
         def attach_diff(report: dict[str, Any]) -> dict[str, Any]:
             report["diff"] = diff_reports(previous, report)

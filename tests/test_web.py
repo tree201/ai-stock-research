@@ -7,6 +7,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 from stock_research.documents import FetchedDocument
+from stock_research.domain import SessionMessage
 from stock_research.llm import HeuristicLLMProvider, ModelNotConfiguredError
 from stock_research.market_data import PriceBar
 from stock_research.service import add_company_source, chat_entry_payload, chat_payload, history_payload, provider_status, recalculate_report, remove_company, remove_company_source, research_documents, resolve_provider, run_research_payload, run_update_payload
@@ -341,7 +342,7 @@ class WebMvpTests(unittest.TestCase):
 
     def test_chat_follow_up_uses_configured_provider_answer(self) -> None:
         class FakeProvider:
-            def answer(self, question: str, context: str) -> str:
+            def answer(self, question: str, context: str, company_name: str = "", company_symbol: str = "") -> str:
                 self.question = question
                 self.context = context
                 return "基于报告，净利润率约为 20%。"
@@ -359,16 +360,54 @@ class WebMvpTests(unittest.TestCase):
                 answer = chat_payload(UUID(report["session_id"]), "利润率怎么看？", db_path=f"{directory}/research.sqlite3")
             self.assertEqual(answer["message"], "基于报告，净利润率约为 20%。")
 
+    def test_chat_follow_up_skips_cross_company_report_context(self) -> None:
+        class FakeProvider:
+            def __init__(self) -> None:
+                self.context: str | None = None
+                self.company_name: str | None = None
+
+            def answer(self, question: str, context: str = "", company_name: str = "", company_symbol: str = "") -> str:
+                self.context = context
+                self.company_name = company_name
+                return "ok"
+
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
+            clear=False,
+        ):
+            tencent = run_research_payload({
+                "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
+                "document": "Revenue FY2024 HK$ 100 million",
+            }, db_path=f"{directory}/research.sqlite3")
+            ckh = run_research_payload({
+                "name": "长江和记", "symbol": "00001", "as_of_date": "2025-12-31", "question": "研究公司",
+                "document": "Revenue FY2024 HK$ 200 million",
+            }, db_path=f"{directory}/research.sqlite3")
+            # 模拟历史污染：把腾讯的报告卡片消息塞进长和的会话。
+            store = SQLiteStore(f"{directory}/research.sqlite3")
+            store.save_session_message(SessionMessage(UUID(ckh["session_id"]), "assistant", "report_card", {"text": "研究已完成", "report_id": tencent["report_id"]}))
+            store.close()
+            provider = FakeProvider()
+            with patch("stock_research.service.resolve_provider", return_value=provider):
+                chat_payload(UUID(ckh["session_id"]), "现金流怎么看？", db_path=f"{directory}/research.sqlite3")
+            # 串号报告必须被跳过：上下文里不得出现腾讯报告，
+            # 且 identity 信息使用会话公司（长江和记）。
+            self.assertIsNotNone(provider.context)
+            self.assertNotIn("腾讯", provider.context or "")
+            self.assertIn("长江和记", provider.context or "")
+            self.assertEqual(provider.company_name, "长江和记")
+
     def test_chat_search_intent_uses_web_search(self) -> None:
         class FakeProvider:
             def __init__(self):
                 self.calls: list[str] = []
 
-            def answer(self, question: str, context: str = "") -> str:
+            def answer(self, question: str, context: str = "", company_name: str = "", company_symbol: str = "") -> str:
                 self.calls.append("answer")
                 return "report answer"
 
-            def answer_with_search(self, question: str, search_results, report_context: str = "") -> str:
+            def answer_with_search(self, question: str, search_results, report_context: str = "", company_name: str = "", company_symbol: str = "") -> str:
                 self.calls.append("answer_with_search")
                 return "search answer"
 
@@ -394,10 +433,10 @@ class WebMvpTests(unittest.TestCase):
 
     def test_chat_search_falls_back_to_report_when_no_results(self) -> None:
         class FakeProvider:
-            def answer(self, question: str, context: str = "") -> str:
+            def answer(self, question: str, context: str = "", company_name: str = "", company_symbol: str = "") -> str:
                 return "report answer"
 
-            def answer_with_search(self, question: str, search_results, report_context: str = "") -> str:
+            def answer_with_search(self, question: str, search_results, report_context: str = "", company_name: str = "", company_symbol: str = "") -> str:
                 return "search answer"
 
         class EmptySearch:

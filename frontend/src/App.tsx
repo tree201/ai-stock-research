@@ -639,10 +639,6 @@ export default function App() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [settings, setSettings] = useState({
-    name: "腾讯（示例）",
-    symbol: "00700",
-  });
   const [newSourceUrl, setNewSourceUrl] = useState("");
   const [newSourceClass, setNewSourceClass] = useState("private");
   const [sourceBusy, setSourceBusy] = useState(false);
@@ -1197,6 +1193,36 @@ export default function App() {
       setError("尚未配置真实模型，请打开‘设置 → 模型接入’选择模型并配置 API Key。");
       return;
     }
+    // identity 防串号：无会话时新会话必须跟随当前选中的公司，
+    // 不允许兜底到任何硬编码公司（如腾讯示例）。
+    let chatTarget: { name: string; symbol: string; market: string } | null =
+      null;
+    if (!sessionId) {
+      const [market, symbol] = (selectedCompanyKey || "").split(":");
+      if (market && symbol) {
+        chatTarget = {
+          name: companyName || panelCompany?.name || symbol,
+          symbol,
+          market,
+        };
+      } else if (panelCompany) {
+        chatTarget = {
+          name: panelCompany.name,
+          symbol: panelCompany.symbol,
+          market: panelCompany.market,
+        };
+      }
+      if (!chatTarget) {
+        setError("请先在左侧选择一家公司，再发送消息。");
+        return;
+      }
+    }
+    // 会话为空时上方守卫保证 chatTarget 非空。
+    const target = chatTarget as {
+      name: string;
+      symbol: string;
+      market: string;
+    };
     submittingRef.current = true;
     threadPinnedRef.current = true;
     setInput("");
@@ -1215,13 +1241,13 @@ export default function App() {
       const result = sessionId
         ? await api.message(sessionId, text)
         : await api.chat({
-            name: settings.name,
-            symbol: settings.symbol,
+            name: target.name,
+            symbol: target.symbol,
             content: text,
           });
       if (result.session_id) {
         setSessionId(result.session_id);
-        if (!sessionId) setSelectedCompanyKey(`HK:${settings.symbol}`);
+        if (!sessionId) setSelectedCompanyKey(`${target.market}:${target.symbol}`);
       }
       if (result.message)
         setMessages((prev) => [
@@ -1394,7 +1420,7 @@ export default function App() {
                 <div className="suggestions">
                   <button
                     onClick={() =>
-                      setInput("研究腾讯是否适合长期持有，重点看现金流和估值")
+                      setInput("研究这家公司是否适合长期持有，重点看现金流和估值")
                     }
                   >
                     研究长期持有价值

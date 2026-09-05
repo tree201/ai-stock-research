@@ -875,6 +875,16 @@ class SQLiteStore:
             raise KeyError(f"unknown report: {report_id}")
         return json.loads(row["payload_json"])
 
+    def latest_report_for_project(self, project_id: UUID) -> dict[str, Any] | None:
+        """Newest completed report across all runs of a project (for agent tools)."""
+        row = self.connection.execute(
+            "SELECT r.payload_json FROM reports r JOIN runs ru ON ru.id = r.run_id"
+            " WHERE ru.project_id = ? AND ru.status = 'completed'"
+            " ORDER BY r.created_at DESC, r.version DESC LIMIT 1",
+            (str(project_id),),
+        ).fetchone()
+        return json.loads(row["payload_json"]) if row else None
+
     def list_projects(self) -> list[dict[str, Any]]:
         rows = self.connection.execute("SELECT * FROM projects ORDER BY updated_at DESC").fetchall()
         return [dict(row) for row in rows]

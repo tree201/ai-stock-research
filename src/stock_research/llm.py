@@ -28,6 +28,8 @@ class AnalysisRequest:
     question: str
     as_of_date: date
     evidence: tuple[dict[str, str], ...]
+    company_name: str = ""
+    company_symbol: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +47,23 @@ class AnalysisResponse:
     provider: str
     model: str
     usage: dict[str, Any] | None = None
+
+
+def identity_directive(company_name: str, company_symbol: str) -> str:
+    """Identity guard: pin the model to the current research subject.
+
+    Injected into every LLM call so the model always knows which company the
+    conversation is about and refuses to leak or mix in other companies.
+    """
+    if not company_name and not company_symbol:
+        return ""
+    name = company_name or "未知公司"
+    symbol = company_symbol or "未知代码"
+    return (
+        f"当前对话的研究对象固定为「{name}」（代码：{symbol}）。"
+        "你只能针对该公司作答；禁止提及、引用或推断任何其他公司的数据；"
+        "如果提供的资料看起来属于其他公司，忽略它并明确说明资料异常。"
+    )
 
 
 class LLMProvider(Protocol):
@@ -116,6 +135,7 @@ class OpenAICompatibleProvider:
             f"[{item.get('evidence_id')}]{(' ' + item['trust']) if item.get('trust') else ''} {item.get('text', '')}"
             for item in request.evidence
         )
+        identity = identity_directive(request.company_name, request.company_symbol)
         instruction = (
             "You are a financial research analyst. Return JSON only in the shape "
             '{"claims":[{"category":"business|risk|industry","text":"...",'
@@ -126,11 +146,12 @@ class OpenAICompatibleProvider:
             "Prefer higher-trust evidence; say so explicitly when a claim relies on [未验证来源]; "
             "when evidence conflicts, trust private material over public web sources. "
             f"Research cutoff: {request.as_of_date.isoformat()}. Question: {request.question}\n"
-            f"Evidence:\n{evidence_text}"
+            + (f"{identity}\n" if identity else "")
+            + f"Evidence:\n{evidence_text}"
         )
         payload = self._payload(
             [
-                {"role": "system", "content": "Produce conservative, evidence-grounded financial analysis."},
+                {"role": "system", "content": "Produce conservative, evidence-grounded financial analysis." + (f" {identity}" if identity else "")},
                 {"role": "user", "content": instruction},
             ],
             json_mode=True,
@@ -164,17 +185,19 @@ class OpenAICompatibleProvider:
         }
         return AnalysisResponse(claims, self.provider_name, self.model, usage)
 
-    def answer(self, question: str, context: str = "") -> str:
+    def answer(self, question: str, context: str = "", company_name: str = "", company_symbol: str = "") -> str:
         """Answer a follow-up question using previously verified report context."""
+        identity = identity_directive(company_name, company_symbol)
         prompt = (
             "你是严谨的股票研究助手。请基于给定的历史研究报告回答用户追问。"
             "只使用报告中已有的信息；如果资料不足，明确说资料不足，不要编造数字。"
             "用简洁中文回答，并在涉及数字时保留原有单位。\n\n"
-            f"历史研究报告：\n{context[:24000]}\n\n用户追问：{question}"
+            + (f"{identity}\n\n" if identity else "")
+            + f"历史研究报告：\n{context[:24000]}\n\n用户追问：{question}"
         )
         payload = self._payload(
             [
-                {"role": "system", "content": "回答必须以提供的研究报告为依据。"},
+                {"role": "system", "content": "回答必须以提供的研究报告为依据。" + (f" {identity}" if identity else "")},
                 {"role": "user", "content": prompt},
             ],
         )
@@ -194,12 +217,13 @@ class OpenAICompatibleProvider:
         except Exception as exc:
             raise LLMError(f"LLM follow-up failed: {exc}") from exc
 
-    def answer_with_search(self, question: str, search_results: list[dict[str, str]], report_context: str = "") -> str:
+    def answer_with_search(self, question: str, search_results: list[dict[str, str]], report_context: str = "", company_name: str = "", company_symbol: str = "") -> str:
         """Answer a follow-up using web search snippets plus report context."""
         sources = "\n".join(
             f"[{index}]{(' ' + item['trust']) if item.get('trust') else ''} {item.get('title', '')}\n{item.get('url', '')}\n{item.get('snippet', '')}"
             for index, item in enumerate(search_results, 1)
         )
+        identity = identity_directive(company_name, company_symbol)
         prompt = (
             "你是严谨的股票研究助手。请结合联网搜索结果回答用户追问。"
             "只使用提供的搜索摘要和历史报告信息，不要编造数字；信息不足时明确说明。"
@@ -207,13 +231,14 @@ class OpenAICompatibleProvider:
             "搜索结果带有可信度标注：[白名单来源] 表示来自可信白名单域名，[未验证来源] 表示未经核实的网络来源。"
             "优先引用可信来源；引用未验证来源时必须注明「据未经核实的网络来源」。"
             "回答末尾用 Markdown 列出参考来源链接（[标题](URL)），并为每条来源标注可信度。\n\n"
-            f"历史研究报告：\n{report_context[:12000]}\n\n"
-            f"联网搜索结果：\n{sources}\n\n"
-            f"用户追问：{question}"
+            + (f"{identity}\n\n" if identity else "")
+            + f"历史研究报告：\n{report_context[:12000]}\n\n"
+            + f"联网搜索结果：\n{sources}\n\n"
+            + f"用户追问：{question}"
         )
         payload = self._payload(
             [
-                {"role": "system", "content": "回答必须以提供的搜索摘要和研究报告为依据，并附来源链接。"},
+                {"role": "system", "content": "回答必须以提供的搜索摘要和研究报告为依据，并附来源链接。" + (f" {identity}" if identity else "")},
                 {"role": "user", "content": prompt},
             ],
         )
@@ -232,6 +257,34 @@ class OpenAICompatibleProvider:
             return content.strip()
         except Exception as exc:
             raise LLMError(f"LLM search follow-up failed: {exc}") from exc
+
+    def chat_json(self, system: str, user: str) -> dict[str, Any]:
+        """Single-turn JSON-mode chat used by the agent exploration loop."""
+        payload = self._payload(
+            [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            json_mode=True,
+        )
+        req = Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with self._opener(req, timeout=self.timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            content = body["choices"][0]["message"]["content"]
+            decoded = json.loads(content) if isinstance(content, str) else content
+            if not isinstance(decoded, dict):
+                raise ValueError("response must be a JSON object")
+            return decoded
+        except LLMError:
+            raise
+        except Exception as exc:
+            raise LLMError(f"LLM chat_json failed: {exc}") from exc
 
     @staticmethod
     def _parse_claim(raw: dict[str, Any], evidence: Iterable[dict[str, str]]) -> AnalysisClaim:

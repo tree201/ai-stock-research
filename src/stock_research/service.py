@@ -17,6 +17,8 @@ from uuid import UUID, uuid4
 
 from .documents import DocumentFetchError, FetchedDocument, HttpDocumentFetcher, PdfTextExtractor, RawDocument, UnsupportedDocumentType, extract_text
 from .domain import ResearchProject, ResearchSession, SessionMessage, utc_now
+from .agent import run_exploration
+from .tools import CompanyTools
 from .facts import FactCandidate
 from .pipeline import ResearchPipeline
 from .report import ReportBuilder, diff_reports
@@ -533,8 +535,8 @@ def answer_follow_up(provider: Any, content: str, report_context: str, project: 
                 }
                 for item in results
             ]
-            return provider.answer_with_search(content, annotated, report_context)
-    return provider.answer(content, report_context)
+            return provider.answer_with_search(content, annotated, report_context, company_name=project.name, company_symbol=project.symbol)
+    return provider.answer(content, report_context, company_name=project.name, company_symbol=project.symbol)
 
 
 def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = None, as_of_date: date | None = None, llm_config: dict[str, Any] | None = None, document_urls: Any = None) -> dict[str, Any]:
@@ -565,15 +567,42 @@ def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = No
         if "模型" in content and hasattr(provider, "model"):
             provider_label = "DeepSeek" if getattr(provider, "provider_name", "") == "deepseek" else "OpenAI 兼容模型"
             answer = f"当前使用的是 {provider_label} 的 {getattr(provider, 'model', 'unknown')}。"
+        elif hasattr(provider, "chat_json"):
+            # 工具化探索：由模型自主决定调用哪个工具，不再按关键词路由。
+            exploration = run_exploration(provider, project, content, CompanyTools(project, store=store))
+            for step in exploration["steps"]:
+                store.save_session_message(SessionMessage(
+                    session_id, "assistant", "tool",
+                    {
+                        "text": f"探索 {step['ref']}：{step['tool']}（{json.dumps(step['args'], ensure_ascii=False)}）",
+                        "tool": step["tool"],
+                        "args": step["args"],
+                        "observation": step["observation"][:600],
+                    },
+                ))
+            answer = exploration["answer"]
+            # 证据链随回答持久化：引用 + 观察编号，供 grounding 评测使用。
+            store.save_session_message(SessionMessage(
+                session_id, "assistant", "text",
+                {"text": answer, "citations": exploration["citations"], "observation_refs": [step["ref"] for step in exploration["steps"]]},
+            ))
+            return {"type": "answer", "session_id": str(session_id), "message": answer}
         elif hasattr(provider, "answer"):
             report_context = ""
             for message in reversed(store.list_session_messages(session_id)):
                 report_id = message.get("content", {}).get("report_id")
                 if report_id:
                     try:
-                        report_context = str(store.load_report(UUID(report_id)).get("markdown", ""))
+                        report = store.load_report(UUID(report_id))
                     except (ValueError, KeyError):
-                        report_context = ""
+                        continue
+                    # identity 校验：报告公司必须与当前会话公司一致，
+                    # 防止串号报告（如 CKH 会话里出现腾讯数据）作为上下文喂给模型。
+                    report_company = report.get("company") or {}
+                    report_symbol = str(report_company.get("symbol", ""))
+                    if report_symbol and report_symbol != project.symbol:
+                        continue
+                    report_context = str(report.get("markdown", ""))
                     if report_context:
                         break
             try:

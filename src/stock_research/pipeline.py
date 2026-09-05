@@ -110,6 +110,7 @@ class ResearchPipeline:
             self.workflow.complete_step(run.id, "extract_financials", {"fact_count": len(facts)})
 
         qualitative_signals = self._signals(chunks)
+        project = self.workflow.projects[run.project_id]
         llm_claims: list[dict] = []
         llm_usage: dict | None = None
         llm_evidence_count = 0
@@ -127,7 +128,9 @@ class ResearchPipeline:
                     for chunk in selected_chunks
                 )
                 llm_evidence_count = len(evidence)
-                analysis = self.llm_provider.analyze(AnalysisRequest(question, as_of_date, evidence))
+                analysis = self.llm_provider.analyze(
+                    AnalysisRequest(question, as_of_date, evidence, project.name, project.symbol)
+                )
                 llm_usage = analysis.usage
                 llm_claims = [
                     {"category": claim.category, "text": claim.text, "evidence_ids": list(claim.evidence_ids), "confidence": claim.confidence, "counter_evidence_ids": list(claim.counter_evidence_ids), "provider": analysis.provider, "model": analysis.model}
@@ -168,7 +171,6 @@ class ResearchPipeline:
             report = store.load_report(UUID(artifacts["reports"][-1]["id"]))
         if report is None:
             self.workflow.start_next_step(run.id)
-            project = self.workflow.projects[run.project_id]
             report = self.report_builder.build(
                 company={"symbol": project.symbol, "name": project.name, "market": project.market},
                 question=question,

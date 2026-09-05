@@ -69,6 +69,20 @@ class LLMTests(unittest.TestCase):
         self.assertEqual(provider.base_url, "https://api.deepseek.com/v1")
         self.assertEqual(provider.model, "deepseek-chat")
 
+    def test_chat_json_accepts_markdown_fenced_json(self) -> None:
+        """模型偶尔把 JSON 包进 ```json 围栏，应剥离后解析而不是报 char 0。"""
+        fenced = {"choices": [{"message": {"content": "```json\n{\"action\": \"final\", \"answer\": \"完成\"}\n```"}}]}
+        provider = OpenAICompatibleProvider("https://example.test/v1", "key", "model", opener=lambda *_a, **_k: _Response(fenced))
+        self.assertEqual(provider.chat_json("system", "user"), {"action": "final", "answer": "完成"})
+
+    def test_chat_json_empty_content_reports_finish_reason(self) -> None:
+        """空内容不能再报 "Expecting value: char 0"，要带 finish_reason 指向风控/瞬时故障。"""
+        empty = {"choices": [{"finish_reason": "content_filter", "message": {"content": ""}}]}
+        provider = OpenAICompatibleProvider("https://example.test/v1", "key", "model", opener=lambda *_a, **_k: _Response(empty))
+        with self.assertRaises(LLMError) as ctx:
+            provider.chat_json("system", "user")
+        self.assertIn("finish_reason=content_filter", str(ctx.exception))
+
     def test_openai_compatible_provider_answers_follow_up(self) -> None:
         payload = {"choices": [{"message": {"content": "报告显示净利润率约为 20%。"}}]}
         provider = OpenAICompatibleProvider("https://example.test/v1", "key", "model", opener=lambda *_args, **_kwargs: _Response(payload))

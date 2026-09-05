@@ -216,6 +216,27 @@ class LLMOutageResilienceTests(TestCase):
         self.assertEqual(analyze_step.status, "completed")
         self.assertIn("llm_error", analyze_step.output_data)
 
+    def test_transient_chat_json_failure_is_retried(self) -> None:
+        """供应商偶发空内容/抖动：重试后恢复，研究不被一轮失败炸掉。"""
+        from stock_research.llm import LLMError as _LLMError
+
+        class FlakyOrchestrator(HeuristicOrchestratorProvider):
+            """第一次 chat_json 抛瞬时错误，之后走正常脚本。"""
+
+            def __init__(self) -> None:
+                super().__init__()
+                self.failures_left = 2
+
+            def chat_json(self, system, user):
+                if self.failures_left > 0:
+                    self.failures_left -= 1
+                    raise _LLMError("LLM chat_json failed: Expecting value: line 1 column 1 (char 0)")
+                return super().chat_json(system, user)
+
+        tools = _tools_with_documents(self.workflow, self.run.id)
+        outcome = run_research(FlakyOrchestrator(), "长实集团", "01113", "研究长实", tools)
+        self.assertIsNotNone(outcome["report"], "瞬时失败重试后研究应正常完成")
+
 
 class _Scripted:
     """按脚本回放决策的假 provider，用于测乱序路径。"""

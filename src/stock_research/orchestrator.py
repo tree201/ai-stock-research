@@ -329,6 +329,21 @@ _ORCHESTRATOR_PROTOCOL = (
 )
 
 
+def _ask(provider: Any, system: str, user: str, attempts: int = 3) -> dict[str, Any]:
+    """带重试的编排决策调用：供应商瞬时空响应/网络抖动不应炸掉整轮研究。
+
+    每轮决策是无状态单轮调用（transcript 全量随 prompt 重发），重试幂等。
+    """
+    last: Exception | None = None
+    for _ in range(attempts):
+        try:
+            decision = provider.chat_json(system, user)
+            return decision if isinstance(decision, dict) else {}
+        except LLMError as exc:
+            last = exc
+    raise LLMError(f"编排循环连续 {attempts} 次调用模型失败：{last}")
+
+
 def run_research(
     provider: Any,
     project_name: str,
@@ -349,8 +364,7 @@ def run_research(
             + (f"已完成步骤：\n{transcript}\n" if transcript else "（尚未开始）\n")
             + ("步数已达上限：若报告未生成请先 review 再 compile_report，然后立即 final。" if step_index == max_steps - 1 else "请输出下一轮 JSON。")
         )
-        decision = provider.chat_json(system, user)
-        decision = decision if isinstance(decision, dict) else {}
+        decision = _ask(provider, system, user)
         action = str(decision.get("action", ""))
         if action == "final":
             return _finalize(decision, steps, tools)
@@ -360,8 +374,8 @@ def run_research(
         ref = f"S{len(steps) + 1}"
         steps.append({"ref": ref, "tool": action, "thought": str(decision.get("thought", "")), "observation": observation.text})
         transcript += f"[{ref}] {action}：{observation.text}\n"
-    decision = provider.chat_json(system, f"可用步骤：\n{tools.catalog()}\n\n研究问题：{question}\n\n已完成：\n{transcript}\n请立即结束（final）。")
-    return _finalize(decision if isinstance(decision, dict) else {}, steps, tools)
+    decision = _ask(provider, system, f"可用步骤：\n{tools.catalog()}\n\n研究问题：{question}\n\n已完成：\n{transcript}\n请立即结束（final）。")
+    return _finalize(decision, steps, tools)
 
 
 def _finalize(decision: dict[str, Any], steps: list[dict[str, Any]], tools: ResearchTools) -> dict[str, Any]:

@@ -15,6 +15,19 @@ from typing import Any, Callable, Iterable, Protocol
 from urllib.request import Request, urlopen
 
 
+def decode_json_loose(content: Any) -> Any:
+    """模型偶尔会把 JSON 包进 ```json 围栏或前后加说明文字；解析前剥离。"""
+    if not isinstance(content, str):
+        return content
+    text = content.strip()
+    if text.startswith("```"):
+        newline = text.find("\n")
+        text = text[newline + 1:] if newline != -1 else text.lstrip("`")
+        if text.rstrip().endswith("```"):
+            text = text.rstrip()[:-3]
+    return json.loads(text)
+
+
 class LLMError(RuntimeError):
     """Raised when a provider cannot return a valid structured response."""
 
@@ -293,8 +306,16 @@ class OpenAICompatibleProvider:
         try:
             with self._opener(req, timeout=self.timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
-            content = body["choices"][0]["message"]["content"]
-            decoded = json.loads(content) if isinstance(content, str) else content
+            choice = body["choices"][0]
+            content = choice["message"].get("content")
+            if isinstance(content, str) and not content.strip():
+                # 空内容时 json.loads 的报错是 "Expecting value: char 0"，毫无信息量；
+                # 带上 finish_reason 让用户能区分风控拦截(f content_filter)与截断(length)。
+                raise LLMError(
+                    f"模型返回空内容（finish_reason={choice.get('finish_reason')}）；"
+                    "多为内容风控或供应商瞬时故障，可重试或更换资料来源"
+                )
+            decoded = decode_json_loose(content)
             if not isinstance(decoded, dict):
                 raise ValueError("response must be a JSON object")
             return decoded

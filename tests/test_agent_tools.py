@@ -1,4 +1,4 @@
-"""Tests for the ReAct exploration loop and company-scoped tools."""
+"""Tests for the unified agent loop, company-scoped tools and chat trace."""
 
 import os
 from datetime import date, datetime, timezone
@@ -7,7 +7,7 @@ import unittest
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
-from stock_research.agent import run_exploration
+from stock_research.agent_core import UnifiedTools, run_agent_turn
 from stock_research.domain import ResearchProject
 from stock_research.market_data import PriceBar
 from stock_research.service import chat_payload, run_research_payload
@@ -152,13 +152,20 @@ class ToolTests(unittest.TestCase):
 
 
 class AgentLoopTests(unittest.TestCase):
+    """循环机制迁移到 agent_core.run_agent_turn 后行为保持不变。"""
+
+    def _explore(self, provider, project, question, tools, max_steps):
+        unified = UnifiedTools(tools, None)
+        outcome = run_agent_turn(provider, project, question, unified, max_steps=max_steps)
+        return {"answer": outcome.answer, "steps": outcome.steps, "citations": outcome.citations}
+
     def test_loop_collects_observations_and_finalizes(self) -> None:
         project = ResearchProject(user_id=uuid4(), company_id=uuid4(), symbol="00700", name="腾讯控股")
         provider = FakeAgentProvider([
             {"thought": "先查报告", "action": "stub", "args": {"keyword": "revenue"}},
             {"thought": "够了", "action": "final", "answer": "根据 [O1]，收入为 1 亿。"},
         ])
-        result = run_exploration(provider, project, "收入多少？", StubTools(), max_steps=3)
+        result = self._explore(provider, project, "收入多少？", StubTools(), max_steps=3)
         self.assertEqual([step["ref"] for step in result["steps"]], ["O1"])
         self.assertIn("1 亿", result["answer"])
         self.assertEqual(result["citations"][0]["observation"], "O1")
@@ -173,10 +180,10 @@ class AgentLoopTests(unittest.TestCase):
             {"action": "stub", "args": {}},
             {"action": "final", "answer": "结论见 [O1] [O2]。"},
         ])
-        result = run_exploration(provider, project, "现在股价多少？", StubTools(), max_steps=2)
+        result = self._explore(provider, project, "现在股价多少？", StubTools(), max_steps=2)
         self.assertEqual(len(result["steps"]), 2)
         self.assertIn("结论", result["answer"])
-        self.assertIn("必须现在给出最终回答", provider.user_prompts[1])
+        self.assertIn("立即给出最终回答", provider.user_prompts[1])
 
     def test_unknown_tool_observation_feeds_back_into_loop(self) -> None:
         project = ResearchProject(user_id=uuid4(), company_id=uuid4(), symbol="00700", name="腾讯控股")
@@ -184,7 +191,7 @@ class AgentLoopTests(unittest.TestCase):
             {"action": "bogus_tool", "args": {}},
             {"action": "final", "answer": "已修正。"},
         ])
-        result = run_exploration(provider, project, "问题", CompanyTools(project), max_steps=3)
+        result = self._explore(provider, project, "问题", CompanyTools(project), max_steps=3)
         self.assertIn("未知工具", result["steps"][0]["observation"])
 
     def test_final_without_answer_raises(self) -> None:
@@ -192,7 +199,7 @@ class AgentLoopTests(unittest.TestCase):
         provider = FakeAgentProvider([{"action": "final", "answer": ""}])
         from stock_research.llm import LLMError
         with self.assertRaises(LLMError):
-            run_exploration(provider, project, "问题", StubTools(), max_steps=2)
+            self._explore(provider, project, "问题", StubTools(), max_steps=2)
 
 
 class ChatIntegrationTests(unittest.TestCase):

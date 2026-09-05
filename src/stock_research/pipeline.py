@@ -12,10 +12,11 @@ from datetime import date
 from typing import Callable, Iterable
 from uuid import UUID, uuid4
 
+from .agent_core import UnifiedTools, run_agent_turn
 from .context import ContextBuilder
 from .documents import DocumentIngestor, RawDocument
 from .llm import LLMProvider
-from .orchestrator import HeuristicOrchestratorProvider, ResearchTools, run_research
+from .orchestrator import HeuristicOrchestratorProvider, ResearchTools
 from .workflow import ResearchWorkflow
 
 
@@ -78,9 +79,12 @@ class ResearchPipeline:
 
         provider = self.llm_provider if self.llm_provider is not None and hasattr(self.llm_provider, "chat_json") else HeuristicOrchestratorProvider()
         project = self.workflow.projects[run.project_id]
-        outcome = run_research(provider, project.name, project.symbol, question, tools)
+        unified = UnifiedTools(None, lambda _question: tools, research_only=True)
+        outcome = run_agent_turn(provider, project, question, unified)
 
-        report = outcome["report"]
+        report = outcome.report
+        if report is None:
+            raise ValueError("research did not produce a report (未出报告：review 未通过或步骤未完成)")
         self.workflow.finish(run.id)
         report.setdefault("report_id", str(uuid4()))
         report["run_id"] = str(run.id)

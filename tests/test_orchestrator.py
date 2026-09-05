@@ -13,14 +13,21 @@ from typing import Any
 from unittest import TestCase
 from uuid import uuid4
 
+from stock_research.agent_core import UnifiedTools, run_agent_turn
 from stock_research.documents import RawDocument
 from stock_research.llm import HeuristicLLMProvider
 from stock_research.orchestrator import (
     HeuristicOrchestratorProvider,
     ResearchTools,
-    run_research,
 )
 from stock_research.workflow import ResearchWorkflow
+
+
+def _run_research(provider: Any, project: Any, question: str, tools: ResearchTools) -> dict[str, Any]:
+    """统一循环 + research_only 工具；返回 {answer, steps, report} 兼容断言。"""
+    unified = UnifiedTools(None, lambda _question: tools, research_only=True)
+    outcome = run_agent_turn(provider, project, question, unified)
+    return {"answer": outcome.answer, "steps": outcome.steps, "report": outcome.report}
 
 
 def _document(company_id: Any) -> RawDocument:
@@ -70,7 +77,7 @@ class ScriptedOrchestratorTests(TestCase):
 
     def test_scripted_run_completes_all_steps_in_order(self) -> None:
         tools = _tools_with_documents(self.workflow, self.run.id)
-        outcome = run_research(HeuristicOrchestratorProvider(), "腾讯", "00700", "研究腾讯", tools)
+        outcome = _run_research(HeuristicOrchestratorProvider(), self.project, "研究腾讯", tools)
         self.assertIsNotNone(outcome["report"])
         completed = {step.step_key for step in self.workflow.runs[self.run.id].steps if step.status == "completed"}
         self.assertEqual(
@@ -122,7 +129,7 @@ class AdaptiveOrderingTests(TestCase):
             {"action": "final", "answer": "完成"},
         ]
         provider = _Scripted(script)
-        outcome = run_research(provider, "汇丰", "00005", "研究汇丰", tools)
+        outcome = _run_research(provider, self.project, "研究汇丰", tools)
         self.assertIsNotNone(outcome["report"])
         # 前两次被拦截的尝试不产生 step/completed；重复 collect 因无新增
         # 资料是幂等 no-op，同样不产生事件，共 7 条
@@ -145,7 +152,7 @@ class AdaptiveOrderingTests(TestCase):
             {"action": "compile_report"},
             {"action": "final", "answer": "完成"},
         ]
-        outcome = run_research(_Scripted(script), "汇丰", "00005", "研究汇丰", tools)
+        outcome = _run_research(_Scripted(script), self.project, "研究汇丰", tools)
         self.assertIsNotNone(outcome["report"])
         repeat = next(step for step in outcome["steps"] if step["tool"] == "extract_financials" and "checkpoint 复用" in step["observation"])
         self.assertIsNotNone(repeat)
@@ -206,7 +213,7 @@ class LLMOutageResilienceTests(TestCase):
 
         tools = _tools_with_documents(self.workflow, self.run.id)
         tools.llm_provider = BlockedProvider()
-        outcome = run_research(HeuristicOrchestratorProvider(), "长实集团", "01113", "研究长实", tools)
+        outcome = _run_research(HeuristicOrchestratorProvider(), self.project, "研究长实", tools)
         self.assertIsNotNone(outcome["report"], "analyze 被风控拦截后研究仍应产出报告骨架")
         degrade = next(step for step in outcome["steps"] if step["tool"] == "analyze_business" and "Content Exists Risk" in step["observation"])
         self.assertIsNotNone(degrade)
@@ -234,7 +241,7 @@ class LLMOutageResilienceTests(TestCase):
                 return super().chat_json(system, user)
 
         tools = _tools_with_documents(self.workflow, self.run.id)
-        outcome = run_research(FlakyOrchestrator(), "长实集团", "01113", "研究长实", tools)
+        outcome = _run_research(FlakyOrchestrator(), self.project, "研究长实", tools)
         self.assertIsNotNone(outcome["report"], "瞬时失败重试后研究应正常完成")
 
 

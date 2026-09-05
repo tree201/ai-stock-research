@@ -18,7 +18,6 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from .agent_core import UnifiedTools, run_agent_turn
 from .calculations import CalculationResult
 from .context import ContextBuilder
 from .documents import DocumentIngestor, EvidenceChunk, RawDocument
@@ -334,34 +333,8 @@ class ResearchTools:
         return citations
 
 
-def run_research(
-    provider: Any,
-    project_name: str,
-    project_symbol: str,
-    question: str,
-    tools: ResearchTools,
-    max_steps: int = 16,
-) -> dict[str, Any]:
-    """旧编排入口：薄包装到统一 agent 循环（research_only 模式）。
-
-    仅保留给 pipeline.run 与既有测试；返回 dict 形状 {answer, steps, report}
-    与旧契约一致。新代码请直接使用 agent_core.run_agent_turn。
-    """
-
-    class _ProjectStub:
-        name = project_name
-        symbol = project_symbol
-
-    unified = UnifiedTools(None, lambda _q: tools, research_only=True)
-    outcome = run_agent_turn(provider, _ProjectStub(), question, unified, max_steps=max_steps)
-    result: dict[str, Any] = {"answer": outcome.answer, "steps": outcome.steps}
-    if outcome.report is not None:
-        result["report"] = outcome.report
-    return result
-
-
 class HeuristicOrchestratorProvider:
-    """无 LLM 时的确定性编排：按预排脚本顺序驱动 run_research。
+    """无 LLM 时的确定性编排：按预排脚本顺序驱动统一 agent 循环。
 
     与原固定瀑布顺序一致，保证无 key 开发与现有测试行为不变。
     """

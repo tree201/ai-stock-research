@@ -10,7 +10,7 @@ from datetime import date
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import UUID
 
 from .service import (
@@ -272,14 +272,24 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             return
-        if not self.path.startswith("/api/company-panel/sources/"):
-            self._send(404, b'{"error":"not found"}', "application/json")
+        if self.path.startswith("/api/company-panel/sources/"):
+            try:
+                remove_company_source(self.path.rsplit("/", 1)[-1])
+                self._send(200, b'{"ok": true}', "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
             return
-        try:
-            remove_company_source(self.path.rsplit("/", 1)[-1])
-            self._send(200, b'{"ok": true}', "application/json; charset=utf-8")
-        except Exception as exc:
-            self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+        if self.path.startswith("/api/companies/"):
+            try:
+                query = parse_qs(urlparse(self.path).query)
+                market = (query.get("market") or ["HK"])[0]
+                symbol = urlparse(self.path).path.rsplit("/", 1)[-1]
+                response = remove_company(unquote(symbol), market)
+                self._send(200, json.dumps(response, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            except Exception as exc:
+                self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            return
+        self._send(404, b'{"error":"not found"}', "application/json")
 
     def log_message(self, _format: str, *_args: Any) -> None:
         return

@@ -6,6 +6,9 @@ import unittest
 from unittest.mock import patch
 from uuid import UUID
 
+import urllib.error
+import urllib.request
+
 from stock_research.documents import FetchedDocument
 from stock_research.domain import SessionMessage
 from stock_research.llm import HeuristicLLMProvider, ModelNotConfiguredError
@@ -507,6 +510,50 @@ class WebMvpTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "company not found"):
                 remove_company("00700", "HK", db_path=db_path)
+
+    def test_delete_http_route_removes_company(self) -> None:
+        """DELETE /api/companies/{symbol}?market=HK 必须真的接线到 remove_company。
+
+        回归背景：service 层早已实现级联删除，但 web.py 的 do_DELETE 没有该
+        路由，前端「移除该公司」实际收到 404。此测试从 HTTP 层验证。
+        """
+        import json as _json
+        import threading
+        from http.server import ThreadingHTTPServer
+        from stock_research.web import ResearchRequestHandler
+
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
+            clear=False,
+        ):
+            db_path = f"{directory}/research.sqlite3"
+            run_research_payload({
+                "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
+                "document": "Revenue FY2024 HK$ 100 million\nRisk: competition",
+            }, db_path=db_path)
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                base = f"http://127.0.0.1:{server.server_address[1]}"
+                request = urllib.request.Request(f"{base}/api/companies/00700?market=HK", method="DELETE")
+                with urllib.request.urlopen(request, timeout=10) as response:
+                    body = _json.loads(response.read().decode("utf-8"))
+                self.assertTrue(body["ok"])
+                self.assertGreaterEqual(body["deleted"].get("projects", 0), 1)
+
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    urllib.request.urlopen(urllib.request.Request(f"{base}/api/companies/00700?market=HK", method="DELETE"), timeout=10)
+                self.assertEqual(caught.exception.code, 400)  # company not found → 400
+            finally:
+                server.shutdown()
+                server.server_close()
+                reopened = SQLiteStore(db_path)
+                try:
+                    self.assertEqual(reopened.find_project("00700"), None)
+                finally:
+                    reopened.close()
 
     def test_company_panel_returns_project_documents_and_reports(self) -> None:
         with TemporaryDirectory() as directory, patch.dict(

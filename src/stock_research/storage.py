@@ -971,6 +971,30 @@ class SQLiteStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def load_company_documents(self, company_id: UUID) -> list[RawDocument]:
+        """全量加载公司文档（含正文），供 collect_filings 运行中收录新增资料。"""
+        rows = self.connection.execute(
+            "SELECT * FROM documents WHERE company_id=? ORDER BY published_at, id",
+            (str(company_id),),
+        ).fetchall()
+        documents: list[RawDocument] = []
+        for row in rows:
+            documents.append(RawDocument(
+                company_id=company_id,
+                source_type=row["source_type"],
+                source_url=row["source_url"],
+                title=row["title"],
+                content=row["content"] or "",
+                published_at=datetime.fromisoformat(row["published_at"]) if row["published_at"] else None,
+                period_start=date.fromisoformat(row["period_start"]) if row["period_start"] else None,
+                period_end=date.fromisoformat(row["period_end"]) if row["period_end"] else None,
+                language=row["language"],
+                source_class=row["source_class"],
+                trust=row["trust"],
+                id=UUID(row["id"]),
+            ))
+        return documents
+
     def list_seen_content_hashes(self, company_id: UUID) -> set[str]:
         """Content hashes of documents already ingested by any run of this company."""
         rows = self.connection.execute(

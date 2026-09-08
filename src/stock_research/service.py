@@ -675,8 +675,9 @@ def recalculate_report(report_id: str, assumptions: dict[str, Any] | None = None
 class ChatResearchWorkspace:
     """聊天内惰性研究激活：模型首次调用研究工具/plan 时才建 run。
 
-    activate 只成功一次；无资料时 pause run 并返回 None（模型会收到
-    可行动的观察，转用探索工具回答）。finalize 负责报告落库与状态收尾。
+    activate 只成功一次；无资料时返回 None 且不锁死（模型可 fetch_filings
+    save=true 登记资料后重试，activate 会重新发现并启动研究）。finalize
+    负责报告落库与状态收尾。
     """
 
     def __init__(
@@ -708,6 +709,11 @@ class ChatResearchWorkspace:
         """创建 run + 预置计划 + 准备资料；返回 ResearchTools 或 None。"""
         if self._activated:
             return self.research_tools
+        documents = prepare_documents(self.store, self.project, {"document_urls": self.document_urls, "document": self.document_text}, self.as_of_date)
+        if not documents:
+            # 无资料不建 run、不锁死激活：模型可用 fetch_filings(save=true)
+            # 登记资料后再次调用研究工具，activate 会重新发现并启动研究。
+            return None
         self._activated = True
         self.workflow = ResearchWorkflow(store=self.store)
         self.workflow.create_project(self.project)
@@ -716,15 +722,6 @@ class ChatResearchWorkspace:
             self.project.id, question, self.as_of_date, run_type="initial", session_id=self.session.id,
         )
         self.workflow.plan(run.id)
-        documents = prepare_documents(self.store, self.project, {"document_urls": self.document_urls, "document": self.document_text}, self.as_of_date)
-        if not documents:
-            # 无资料不走完整研究：pause 让后续"研究这家公司"可恢复语义简单，
-            # 模型收到引导观察后转探索工具回答。
-            try:
-                self.workflow.pause(run.id)
-            except ValueError:
-                pass
-            return None
         from .orchestrator import ResearchTools
 
         tools = ResearchTools(

@@ -182,6 +182,16 @@ class ResearchTools:
     # -- steps ---------------------------------------------------------------
 
     def collect_filings(self, args: dict[str, Any]) -> Observation:
+        # 收录前从库中刷新：模型可能刚通过 fetch_filings(save=true) 登记了新资料
+        store = self.workflow.store
+        if store is not None:
+            run = self.workflow.runs[self.run_id]
+            project = self.workflow.projects[run.project_id]
+            known_ids = {str(document.id) for document in self.documents}
+            self.documents.extend(
+                document for document in store.load_company_documents(project.company_id)
+                if str(document.id) not in known_ids
+            )
         if not self.documents:
             raise ToolError("没有可用资料（documents 为空）")
         # 增量收录：只处理还没入过工作区的文档，重复调用是幂等 no-op

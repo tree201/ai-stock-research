@@ -13,11 +13,11 @@ import json
 from typing import Any
 from urllib.parse import urlparse
 
-from .documents import DocumentFetchError, HttpDocumentFetcher, extract_text
+from .documents import DocumentFetchError, HttpDocumentFetcher, RawDocument, extract_text
 from .domain import ResearchProject
 from .market_data import MarketDataError, YahooFinanceProvider
 from .storage import SQLiteStore
-from .trust import DEFAULT_TRUSTED_HOSTS, host_in_set
+from .trust import CLASS_PUBLIC, DEFAULT_TRUSTED_HOSTS, host_in_set
 from .web_search import DuckDuckGoSearch, GoogleNewsSearch
 
 MAX_OBSERVATION_CHARS = 1600
@@ -160,8 +160,10 @@ class CompanyTools:
         url = str(args.get("url", "")).strip()
         if not url.startswith(("http://", "https://")):
             raise ToolError("url 必须以 http(s):// 开头")
+        save = bool(args.get("save"))
         try:
-            # 探索是只读行为：允许任意来源，但必须标注可信度，不进入已验证语料。
+            # 探索允许任意来源，但必须标注可信度；save=true 时登记为研究资料，
+            # 供 collect_filings 收录进已验证语料（引用时保留来源标注）。
             fetched = HttpDocumentFetcher(allowed_hosts=(), allow_any_host=True).fetch(url)
             text = extract_text(fetched)
         except DocumentFetchError as exc:
@@ -172,7 +174,28 @@ class CompanyTools:
         ref = "F1"
         body = text.strip()[:MAX_OBSERVATION_CHARS]
         citation = {"ref": ref, "title": url, "url": url, "trust": trust}
-        return Observation("fetch_filings", args, f"{tag} {url} 的正文摘录（引用为 [{ref}]）：\n{body}", [citation])
+        note = self._save_as_document(url, text, trust) if save else ""
+        return Observation("fetch_filings", args, f"{tag} {url} 的正文摘录（引用为 [{ref}]）：\n{body}{note}", [citation])
+
+    def _save_as_document(self, url: str, text: str, trust: str) -> str:
+        if self.store is None:
+            raise ToolError("没有可用的本地存储，无法保存资料")
+        host = urlparse(url).hostname or ""
+        title = next((line.strip() for line in text.splitlines() if line.strip()), "") or url
+        document = RawDocument(
+            company_id=self.project.company_id,
+            source_type="hkex_filing" if "hkexnews.hk" in host else "company_ir",
+            source_url=url,
+            title=title[:120],
+            content=text,
+            source_class=CLASS_PUBLIC,
+            trust=trust,
+        )
+        self.store.save_document(document)
+        # 同步登记为公司来源，下一次研究激活时自动发现该资料。
+        self.store.add_company_source(self.project.company_id, url, title[:120], source_class=CLASS_PUBLIC)
+        self.store.connection.commit()
+        return "\n\n（已登记为该公司研究资料；研究时会自动收录，可信度按来源标注。）"
 
 
 def render_tool_catalog(tools: CompanyTools) -> str:

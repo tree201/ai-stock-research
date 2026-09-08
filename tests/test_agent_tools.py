@@ -145,6 +145,47 @@ class ToolTests(unittest.TestCase):
         observation = CompanyTools(project).run("fetch_filings", {"url": "file:///etc/passwd"})
         self.assertFalse(observation.ok)
 
+    def test_fetch_filings_save_registers_document_and_source(self) -> None:
+        project = _load_project(self.db_path, create=True)
+        store = SQLiteStore(self.db_path)
+
+        class FakeFetcher:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def fetch(self, url: str):
+                return object()
+
+        with patch("stock_research.tools.HttpDocumentFetcher", FakeFetcher), \
+             patch("stock_research.tools.extract_text", return_value="中国食品 2024 年度业绩公告\n净利润 25.8 亿港元"):
+            observation = CompanyTools(project, store=store).fetch_filings(
+                {"url": "https://www1.hkexnews.hk/listedco/listconews/a.pdf", "save": True},
+            )
+        self.assertIn("已登记为该公司研究资料", observation.text)
+        rows = store.connection.execute("SELECT title, trust, source_type FROM documents WHERE company_id=?", (str(project.company_id),)).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["trust"], "whitelist")
+        self.assertEqual(rows[0]["source_type"], "hkex_filing")
+        self.assertIn("中国食品 2024 年度业绩公告", rows[0]["title"])
+        sources = store.list_company_source_urls(project.company_id)
+        self.assertEqual(sources, ["https://www1.hkexnews.hk/listedco/listconews/a.pdf"])
+
+    def test_fetch_filings_save_without_store_fails_gracefully(self) -> None:
+        project = _load_project(self.db_path, create=True)
+
+        class FakeFetcher:
+            def __init__(self, *args, **kwargs) -> None:
+                pass
+
+            def fetch(self, url: str):
+                return object()
+
+        with patch("stock_research.tools.HttpDocumentFetcher", FakeFetcher), \
+             patch("stock_research.tools.extract_text", return_value="正文"):
+            observation = CompanyTools(project).run("fetch_filings", {"url": "https://a.example.com/x.pdf", "save": True})
+        self.assertFalse(observation.ok)
+        self.assertIn("无法保存资料", observation.text)
+
     def test_unknown_tool_returns_error_observation(self) -> None:
         project = _load_project(self.db_path, create=True)
         observation = CompanyTools(project).run("nope", {})
@@ -234,6 +275,61 @@ class ChatIntegrationTests(unittest.TestCase):
             self.assertEqual(final["message_type"], "text")
             self.assertEqual(final["content"]["citations"][0]["observation"], "O1")
             self.assertEqual(final["content"]["observation_refs"], ["O1"])
+
+    def test_workspace_activate_retries_after_fetch_save(self) -> None:
+        """无资料激活返回 None 且不锁死；fetch_filings(save=true) 登记资料后可再次激活。"""
+        from datetime import date as date_cls
+
+        from stock_research.service import ChatResearchWorkspace, create_project_with_session
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3", "DEEPSEEK_API_KEY": "", "AI_STOCK_LLM_API_KEY": ""},
+            clear=False,
+        ):
+            db_path = f"{directory}/research.sqlite3"
+            store = SQLiteStore(db_path)
+            try:
+                created = create_project_with_session({"name": "中国食品", "symbol": "00506"})
+                project = store.load_project(UUID(created["project"]["id"]))
+                session = store.load_session(UUID(created["session"]["id"]))
+                workspace = ChatResearchWorkspace(store, project, session, as_of_date=date_cls(2025, 12, 31), llm_config={})
+
+                class FakeFetcher:
+                    def __init__(self, *args, **kwargs) -> None:
+                        pass
+
+                    def fetch(self, url: str):
+                        from datetime import datetime, timezone
+
+                        from stock_research.documents import FetchedDocument
+
+                        return FetchedDocument(url, "text/html", fake_text.encode("utf-8"), datetime.now(timezone.utc))
+
+                fake_text = (
+                    "中国食品 2024 年度业绩公告\n净利润 25.8 亿港元\n收入 280.5 亿港元\n"
+                    "经营活动现金流 18.0 亿港元\n资本开支 4.0 亿港元\n现金 60.0 亿港元\n债务 15.0 亿港元\n"
+                    "主要风险为市场竞争和原材料成本波动。"
+                )
+                with patch("stock_research.service.HttpDocumentFetcher", FakeFetcher), \
+                     patch("stock_research.tools.HttpDocumentFetcher", FakeFetcher), \
+                     patch("stock_research.service.extract_text", return_value=fake_text), \
+                     patch("stock_research.service.GoogleNewsSearch.search", return_value=[]), \
+                     patch("stock_research.service.DuckDuckGoSearch.search", return_value=[]):
+                    # 无资料：激活返回 None 且不创建 run、不锁死
+                    self.assertIsNone(workspace.activate("研究公司"))
+                    self.assertEqual(len(workspace.workflow.runs if workspace.workflow else {}), 0, "无资料激活不得创建 run")
+                    # 模拟 fetch_filings(save=true)：登记文档 + 公司来源
+                    tools = CompanyTools(project, store=store)
+                    observation = tools.fetch_filings({"url": "https://www1.hkexnews.hk/x.pdf", "save": True})
+                    self.assertTrue(observation.ok)
+                    # 再次激活：发现新登记的资料，成功创建 run
+                    with patch("stock_research.service.resolve_provider", return_value=None):
+                        research = workspace.activate("研究公司")
+                self.assertIsNotNone(research)
+                self.assertTrue(workspace._activated)
+                self.assertGreaterEqual(len(research.documents), 1)
+            finally:
+                store.close()
 
     def test_chat_follow_up_without_report_still_answers_via_tools(self) -> None:
         from stock_research.service import create_project_with_session

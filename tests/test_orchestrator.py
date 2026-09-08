@@ -22,6 +22,7 @@ from stock_research.agent_core import (
     run_agent_turn,
 )
 from stock_research.documents import RawDocument
+from stock_research.domain import ResearchProject
 from stock_research.llm import HeuristicLLMProvider, LLMError
 from stock_research.orchestrator import (
     HeuristicOrchestratorProvider,
@@ -67,6 +68,32 @@ def _tools_with_documents(workflow: ResearchWorkflow, run_id) -> ResearchTools:
     )
     tools.documents = [_document(project.company_id)]
     return tools
+
+
+class CollectFilingsRefreshTests(TestCase):
+    """collect_filings 收录前从库刷新：fetch_filings(save=true) 登记的资料运行中即可用。"""
+
+    def test_collect_filings_picks_up_documents_saved_after_activation(self) -> None:
+        from stock_research.storage import SQLiteStore
+
+        store = SQLiteStore()
+        workflow = ResearchWorkflow(store=store)
+        project = ResearchProject(user_id=uuid4(), company_id=uuid4(), symbol="00700", name="腾讯")
+        workflow.create_project(project)
+        run = workflow.create_run(project.id, "研究公司", date(2025, 12, 31))
+        workflow.plan(run.id)
+        tools = _tools_with_documents(workflow, run.id)
+        # 模拟研究启动后，模型通过 fetch_filings(save=true) 登记了新资料
+        late = RawDocument(
+            company_id=project.company_id, source_type="hkex_filing",
+            source_url="https://www1.hkexnews.hk/late.pdf", title="新公告",
+            content="净利润 30.0 百万港元\n收入 200.0 百万港元", published_at=None,
+        )
+        store.save_document(late)
+        observation = tools.run("collect_filings", {})
+        self.assertTrue(observation.ok)
+        self.assertIn("已收录 2 篇新资料", observation.text)
+        self.assertIn(str(late.id), {str(document.id) for document in tools.documents})
 
 
 class TranscriptCompactionTests(TestCase):

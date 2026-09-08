@@ -121,7 +121,7 @@ class UnifiedTools:
             if research is None:
                 return Observation(
                     name, args,
-                    "工具执行失败：研究环境尚未就绪（缺少可用资料）。请改用探索工具回答，或建议用户在「公司详情 → 资料」登记财报/公告链接。",
+                    "工具执行失败：研究环境尚未就绪（缺少可用资料）。可先用 fetch_filings 抓取公司财报/公告页面并以 save=true 登记资料，再重试本步骤。",
                 )
             return research.run(name, args)
         if self.company_tools is not None and name in {spec["name"] for spec in self.company_tools.specs()}:
@@ -197,7 +197,8 @@ _AGENT_PROTOCOL = (
     '给出最终回答：{"thought":"简短理由","action":"final","answer":"面向用户的中文回答"}\n'
     "规则：\n"
     "1. 简单问题（查行情、问报告里的数字、搜新闻）直接用探索工具，1-3 次调用后回答；\n"
-    "2. 需要完整研究时先调用 plan 写下计划，再按计划调用研究步骤工具，出报告后回答；\n"
+    "2. 需要完整研究时先调用 plan 写下计划，再按计划调用研究步骤工具，出报告后回答；"
+    "若研究因资料不足失败，用 fetch_filings 抓取公司财报/公告页面并以 save=true 登记为资料，再重新研究；\n"
     "3. 数值计算必须走 calculate_valuation 工具，禁止心算；compile_report 必须先通过 review；\n"
     "4. 工具的观察结果以 [O1] [O2]… 编号提供，最终回答必须基于这些观察；\n"
     "5. 回答中引用观察时标注对应的 [O*] 编号，引用了网络/公告来源时在末尾用"

@@ -12,17 +12,25 @@ from __future__ import annotations
 from typing import Any
 
 # 统一强度档位，前端按此顺序展示。
-THINKING_LEVELS: tuple[str, ...] = ("off", "low", "medium", "high")
+THINKING_LEVELS: tuple[str, ...] = ("off", "low", "medium", "high", "max")
 
-LEVEL_LABELS: dict[str, str] = {"off": "关闭", "low": "低", "medium": "中", "high": "高"}
+LEVEL_LABELS: dict[str, str] = {"off": "关闭", "low": "低", "medium": "中", "high": "高", "max": "最大"}
 
 # 各家推理开关的参数形状（国内供应商并不统一，逐家映射）：
 #   - 智谱 / 豆包(方舟): thinking: {type: enabled|disabled}
 #   - 通义千问(百炼):    enable_thinking: true|false (+ 可选 thinking_budget)
-#   - DeepSeek:         无档位参数（reasoner 固定深度思考，chat 固定关闭）
+#   - DeepSeek V4:      thinking: {type: enabled|disabled} + reasoning_effort: high|max
+#                       （off 必须显式发 disabled——服务端默认开思考）
 _THINKING_TOGGLE_ZHIPU = {"off": {"thinking": {"type": "disabled"}}, "low": {"thinking": {"type": "enabled"}}, "medium": {"thinking": {"type": "enabled"}}, "high": {"thinking": {"type": "enabled"}}}
 _THINKING_TOGGLE_QWEN = {"off": {"enable_thinking": False}, "low": {"enable_thinking": True}, "medium": {"enable_thinking": True}, "high": {"enable_thinking": True, "thinking_budget": 32768}}
 _THINKING_TOGGLE_ARK = _THINKING_TOGGLE_ZHIPU
+# DeepSeek V4 官方档位是 off/high/max（thinking 开关 + reasoning_effort），
+# deepseek-harness 同款映射；低档不提供——服务端会把 low/medium 静默映射为 high。
+_THINKING_TOGGLE_DEEPSEEK = {
+    "off": {"thinking": {"type": "disabled"}},
+    "high": {"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
+    "max": {"thinking": {"type": "enabled"}, "reasoning_effort": "max"},
+}
 
 BUILTIN_PROVIDERS: tuple[dict[str, Any], ...] = (
     {
@@ -31,8 +39,9 @@ BUILTIN_PROVIDERS: tuple[dict[str, Any], ...] = (
         "protocol": "openai-compatible",
         "base_url": "https://api.deepseek.com/v1",
         "models": (
-            {"model_id": "deepseek-chat", "display_name": "DeepSeek-V3（对话）", "thinking_levels": {}},
-            {"model_id": "deepseek-reasoner", "display_name": "DeepSeek-R1（深度思考，固定）", "thinking_levels": {}},
+            {"model_id": "deepseek-v4-flash", "display_name": "DeepSeek-V4-Flash", "thinking_levels": _THINKING_TOGGLE_DEEPSEEK},
+            {"model_id": "deepseek-v4-pro", "display_name": "DeepSeek-V4-Pro", "thinking_levels": _THINKING_TOGGLE_DEEPSEEK},
+            {"model_id": "deepseek-v4-flash-vision-exp", "display_name": "DeepSeek-V4-Flash（视觉实验）", "thinking_levels": _THINKING_TOGGLE_DEEPSEEK},
         ),
     },
     {

@@ -9,7 +9,7 @@ import { useEffect, useId, useMemo, useRef, useState, type FocusEvent, type Keyb
 import { Check, ChevronDown, ChevronRight, Settings2 } from "lucide-react";
 import { api, LlmConfig } from "./api";
 
-const LEVEL_LABELS: Record<string, string> = { off: "关闭", low: "低", medium: "中", high: "高" };
+const LEVEL_LABELS: Record<string, string> = { off: "关闭", low: "低", medium: "中", high: "高", max: "最大" };
 
 /** 菜单当前面板：root 两行入口 / model 模型列表 / effort 推理等级列表。 */
 type Pane = "root" | "model" | "effort";

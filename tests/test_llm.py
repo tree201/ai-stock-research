@@ -25,6 +25,32 @@ class _Response:
     def read(self): return self.payload
 
 
+class _SseResponse:
+    """chat_json 流式双打：按 SSE data: 行逐块产出，并捕获请求体供断言。"""
+
+    last_request: dict | None = None
+
+    def __init__(self, chunks: list[dict]):
+        lines = ["data: " + json.dumps(chunk) for chunk in chunks] + ["data: [DONE]"]
+        self._lines = "\n\n".join(lines).encode("utf-8")
+
+    def __call__(self, req, *_args, **_kwargs):
+        _SseResponse.last_request = json.loads(req.data.decode("utf-8"))
+        return self
+
+    def __enter__(self): return self
+    def __exit__(self, *_args): return False
+    def __iter__(self):
+        return iter(self._lines.split(b"\n"))
+
+
+def _sse_chunk(delta_content: str | None, finish_reason: str | None = None) -> dict:
+    choice: dict = {"delta": {"content": delta_content} if delta_content is not None else {}}
+    if finish_reason:
+        choice["finish_reason"] = finish_reason
+    return {"choices": [choice]}
+
+
 class _HttpErrorResponse:
     """urlopen double that raises HTTPError carrying a JSON error body."""
 
@@ -78,16 +104,34 @@ class LLMTests(unittest.TestCase):
         self.assertEqual(provider.base_url, "https://api.deepseek.com/v1")
         self.assertEqual(provider.model, "deepseek-chat")
 
-    def test_chat_json_accepts_markdown_fenced_json(self) -> None:
-        """模型偶尔把 JSON 包进 ```json 围栏，应剥离后解析而不是报 char 0。"""
-        fenced = {"choices": [{"message": {"content": "```json\n{\"action\": \"final\", \"answer\": \"完成\"}\n```"}}]}
-        provider = OpenAICompatibleProvider("https://example.test/v1", "key", "model", opener=lambda *_a, **_k: _Response(fenced))
+    def test_chat_json_streams_sse_and_accepts_fenced_json(self) -> None:
+        """决策调用走流式 SSE（思考模式防挂死），```json 围栏内容剥离后解析。"""
+        provider = OpenAICompatibleProvider(
+            "https://example.test/v1", "key", "model",
+            opener=_SseResponse([_sse_chunk("```json\n{\"action\": \"final\","), _sse_chunk(" \"answer\": \"完成\"}\n```")]),
+        )
         self.assertEqual(provider.chat_json("system", "user"), {"action": "final", "answer": "完成"})
+        request = _SseResponse.last_request or {}
+        self.assertTrue(request.get("stream"))
+
+    def test_chat_json_forces_thinking_off_for_decisions(self) -> None:
+        """模型档位开启思考时，决策调用强制 thinking disabled（高频廉价操作）。"""
+        provider = OpenAICompatibleProvider(
+            "https://example.test/v1", "key", "model",
+            extra_params={"thinking": {"type": "enabled"}, "reasoning_effort": "high"},
+            opener=_SseResponse([_sse_chunk("{\"action\": \"final\", \"answer\": \"好\"}")]),
+        )
+        self.assertEqual(provider.chat_json("system", "user"), {"action": "final", "answer": "好"})
+        request = _SseResponse.last_request or {}
+        self.assertEqual(request.get("thinking"), {"type": "disabled"})
+        self.assertNotIn("reasoning_effort", request)
 
     def test_chat_json_empty_content_reports_finish_reason(self) -> None:
         """空内容不能再报 "Expecting value: char 0"，要带 finish_reason 指向风控/瞬时故障。"""
-        empty = {"choices": [{"finish_reason": "content_filter", "message": {"content": ""}}]}
-        provider = OpenAICompatibleProvider("https://example.test/v1", "key", "model", opener=lambda *_a, **_k: _Response(empty))
+        provider = OpenAICompatibleProvider(
+            "https://example.test/v1", "key", "model",
+            opener=_SseResponse([_sse_chunk(None, finish_reason="content_filter")]),
+        )
         with self.assertRaises(LLMError) as ctx:
             provider.chat_json("system", "user")
         self.assertIn("finish_reason=content_filter", str(ctx.exception))

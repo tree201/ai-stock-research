@@ -163,6 +163,21 @@ class ResearchWorkflow:
         self._emit(run, "run/paused", {})
         return run
 
+    def fail_run(self, run_id: UUID, error: dict[str, Any] | None = None) -> ResearchRun:
+        """Mark a run FAILED (idempotent) so agent-loop crashes don't leave
+        orphan runs stuck in an active status forever."""
+        run = self._get_run(run_id)
+        if run.status in {RunStatus.COMPLETED, RunStatus.CANCELED, RunStatus.FAILED}:
+            return run
+        try:
+            run.transition(RunStatus.FAILED)
+        except ValueError:
+            # CREATED→FAILED 不在状态机里（尚未 plan 的 run 无研究可败），
+            # 按 CANCELED 收尾，同样脱离活跃态。
+            run.transition(RunStatus.CANCELED)
+        self._emit(run, "run/failed", {"error": error or {}})
+        return run
+
     def finish(self, run_id: UUID) -> ResearchRun:
         run = self._get_run(run_id)
         if any(step.status != "completed" for step in run.steps):

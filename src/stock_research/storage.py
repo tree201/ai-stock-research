@@ -294,6 +294,21 @@ class SQLiteStore:
                     "INSERT OR IGNORE INTO llm_models (provider_id,model_id,display_name,thinking_levels,default_level,enabled) VALUES (?,?,?,?,?,1)",
                     (provider_id, model["model_id"], model["display_name"], _json(parse_thinking_levels(model["thinking_levels"])), model.get("default_level")),
                 )
+        # 目录演进回填：内置模型行已存在但档位为空（如 DeepSeek V4 上线前的
+        # 旧行），按最新目录补齐；用户已自定义档位的行不动。
+        for provider in BUILTIN_PROVIDERS:
+            row = self.connection.execute("SELECT id FROM llm_providers WHERE route=?", (provider["route"],)).fetchone()
+            if not row:
+                continue
+            for model in provider["models"]:
+                levels = parse_thinking_levels(model["thinking_levels"])
+                if not levels:
+                    continue
+                self.connection.execute(
+                    "UPDATE llm_models SET thinking_levels=?, default_level=COALESCE(default_level, ?) "
+                    "WHERE provider_id=? AND model_id=? AND (thinking_levels IS NULL OR thinking_levels IN ('', '{}', 'null'))",
+                    (_json(levels), model.get("default_level"), row["id"], model["model_id"]),
+                )
 
     # --- LLM provider/model hub -------------------------------------------------
 

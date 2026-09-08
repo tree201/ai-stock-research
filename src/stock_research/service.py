@@ -744,6 +744,26 @@ class ChatResearchWorkspace:
             "或改用探索工具回答用户问题。"
         )
 
+    def fail(self, exc: Exception) -> None:
+        """agent 循环崩溃兜底：run 落 FAILED + 错误消息持久化。
+
+        没有这一步，模型调用连续失败（如供应商网关挂起）会让 run 永远停在
+        活跃态——UI 无报告也无错误，只剩一串“完成”气泡的孤儿 run。
+        """
+        if self.workflow is not None and self.run is not None:
+            try:
+                self.workflow.fail_run(self.run.id, {"message": str(exc)[:500], "type": type(exc).__name__})
+            except Exception:
+                pass
+        self.store.save_session_message(SessionMessage(
+            self.session.id, "assistant", "error",
+            {"text": f"研究执行失败：{exc}"},
+            run_id=self.run.id if self.run else None,
+        ))
+        self.session.active_run_id = None
+        self.session.updated_at = utc_now()
+        self.store.save_session(self.session)
+
     def finalize(self, outcome: Any) -> None:
         """研究出报告则落 report_card；研究未完成则 pause 留给后续恢复。"""
         if self.workflow is None or self.run is None:
@@ -831,7 +851,11 @@ def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = No
                 },
             ))
 
-        outcome = run_agent_turn(provider, project, content, tools, on_step=persist_step, on_event=on_event)
+        try:
+            outcome = run_agent_turn(provider, project, content, tools, on_step=persist_step, on_event=on_event)
+        except Exception as exc:
+            workspace.fail(exc)
+            raise
         workspace.finalize(outcome)
         answer = outcome.answer
         # 证据链随回答持久化：引用 + 观察编号，供 grounding 评测使用。

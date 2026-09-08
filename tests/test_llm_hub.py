@@ -49,7 +49,7 @@ class LlmCatalogTests(unittest.TestCase):
         self.assertEqual(params_for_level({}, "off"), {})
 
     def test_thinking_levels_are_canonical(self) -> None:
-        self.assertEqual(THINKING_LEVELS, ("off", "low", "medium", "high"))
+        self.assertEqual(THINKING_LEVELS, ("off", "low", "medium", "high", "max"))
 
 
 class LlmHubStorageTests(unittest.TestCase):
@@ -66,18 +66,18 @@ class LlmHubStorageTests(unittest.TestCase):
         self.assertTrue(any(provider["name"] == "DeepSeek" for provider in providers))
         deepseek = next(p for p in providers if p["name"] == "DeepSeek")
         models = self.store.list_llm_models(deepseek["id"])
-        self.assertTrue(any(model["model_id"] == "deepseek-chat" for model in models))
+        self.assertTrue(any(model["model_id"] == "deepseek-v4-flash" for model in models))
         self.store.update_llm_provider(deepseek["id"], api_key="sk-user")
         self.store.remove_llm_model(
-            next(m["id"] for m in models if m["model_id"] == "deepseek-reasoner")
+            next(m["id"] for m in models if m["model_id"] == "deepseek-v4-pro")
         )
         reopened = SQLiteStore(f"{self._dir.name}/research.sqlite3")
         try:
             again = next(p for p in reopened.list_llm_providers() if p["name"] == "DeepSeek")
             self.assertEqual(again["api_key"], "sk-user")
             model_ids = [m["model_id"] for m in reopened.list_llm_models(again["id"])]
-            self.assertNotIn("deepseek-reasoner", model_ids)
-            self.assertIn("deepseek-chat", model_ids)
+            self.assertNotIn("deepseek-v4-pro", model_ids)
+            self.assertIn("deepseek-v4-flash", model_ids)
         finally:
             reopened.close()
 
@@ -248,8 +248,8 @@ class LlmSelectionServiceTests(unittest.TestCase):
         result = service.set_llm_selection_payload({"model_row_id": model["id"]})
         self.assertEqual(result["config"]["selection"]["level"], "high")
 
-        fixed = next(p for p in self.store.list_llm_providers() if p["name"] == "DeepSeek")
-        fixed_model = next(m for m in self.store.list_llm_models(fixed["id"]) if m["model_id"] == "deepseek-chat")
+        fixed = next(p for p in self.store.list_llm_providers() if p["route"] == "siliconflow")
+        fixed_model = next(m for m in self.store.list_llm_models(fixed["id"]) if m["model_id"] == "deepseek-ai/DeepSeek-R1")
         result = service.set_llm_selection_payload({"model_row_id": fixed_model["id"]})
         self.assertEqual(result["config"]["selection"]["level"], "off")
 
@@ -259,8 +259,10 @@ class LlmSelectionServiceTests(unittest.TestCase):
         payload = service.llm_config_payload()
         glm = next(m for m in payload["models"] if m["model_id"] == "glm-4.6")
         self.assertEqual(glm["default_level"], "high")
-        chat = next(m for m in payload["models"] if m["model_id"] == "deepseek-chat")
-        self.assertEqual(chat["default_level"], "off")
+        v4 = next(m for m in payload["models"] if m["model_id"] == "deepseek-v4-flash")
+        self.assertEqual(v4["default_level"], "high")
+        fixed = next(m for m in payload["models"] if m["model_id"] == "deepseek-ai/DeepSeek-R1")
+        self.assertEqual(fixed["default_level"], "off")
 
 
 class LlmDiscoveryTests(unittest.TestCase):
@@ -288,15 +290,15 @@ class LlmDiscoveryTests(unittest.TestCase):
 
         provider = next(p for p in self.store.list_llm_providers() if p["name"] == "DeepSeek")
         self.store.update_llm_provider(provider["id"], api_key="sk-x")
-        remote = ["deepseek-chat", "deepseek-new-model", "deepseek-v3.2"]
+        remote = ["deepseek-v4-flash", "deepseek-new-model", "deepseek-v3.2"]
         with mock.patch.object(service, "list_remote_models", return_value=remote) as mocked:
             payload = service.discover_llm_models_payload({"provider_id": provider["id"]})
         mocked.assert_called_once()
         items = {item["model_id"]: item["added"] for item in payload["models"]}
-        self.assertTrue(items["deepseek-chat"])  # 目录里已有
+        self.assertTrue(items["deepseek-v4-flash"])  # 目录里已有
         self.assertFalse(items["deepseek-v3.2"])
 
-        result = service.sync_llm_models_payload({"provider_id": provider["id"], "models": [{"model_id": "deepseek-v3.2"}, {"model_id": "deepseek-chat"}]})
+        result = service.sync_llm_models_payload({"provider_id": provider["id"], "models": [{"model_id": "deepseek-v3.2"}, {"model_id": "deepseek-v4-flash"}]})
         stored = {m["model_id"] for m in self.store.list_llm_models(provider["id"])}
         self.assertIn("deepseek-v3.2", stored)
 

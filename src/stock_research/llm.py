@@ -322,7 +322,14 @@ class OpenAICompatibleProvider:
             raise LLMError(f"LLM search follow-up failed: {exc}") from exc
 
     def chat_json(self, system: str, user: str) -> dict[str, Any]:
-        """Single-turn JSON-mode chat used by the agent exploration loop."""
+        """Single-turn JSON-mode chat used by the agent exploration loop.
+
+        流式 SSE（对齐 deepseek-harness：永远 stream: true）。思考模式下模型
+        会先长时间输出推理链，非流式请求在首字节前要干等整个生成周期，容易
+        撞上 socket 超时且重试无法给出任何中间反馈；流式下推理增量持续到达，
+        urllib 的 timeout 是逐次 recv 的空闲超时——只要数据在流就永不超时，
+        真断线才触发。
+        """
         payload = self._payload(
             [
                 {"role": "system", "content": system},
@@ -330,22 +337,56 @@ class OpenAICompatibleProvider:
             ],
             json_mode=True,
         )
+        # 决策调用是 ReAct 循环里的高频廉价操作（harness session-title 先例）：
+        # 模型档位开了思考时在此强制关闭——选工具不需要深度思考，还避免每步
+        # 决策都烧思考 token（reasoning_effort 一并剥离，对齐 harness off 语义）。
+        # 固定思考模型（无 thinking 键）不受影响。
+        thinking = payload.get("thinking")
+        if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+            payload["thinking"] = {"type": "disabled"}
+            payload.pop("reasoning_effort", None)
+        payload["stream"] = True
         req = Request(
             f"{self.base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "text/event-stream",
+            },
             method="POST",
         )
         try:
+            content_parts: list[str] = []
+            finish_reason: str | None = None
             with self._opener(req, timeout=self.timeout) as response:
-                body = json.loads(response.read().decode("utf-8"))
-            choice = body["choices"][0]
-            content = choice["message"].get("content")
-            if isinstance(content, str) and not content.strip():
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data = line[len("data:"):].strip()
+                    if data == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data)
+                    except ValueError:
+                        continue
+                    choices = chunk.get("choices") or []
+                    if not choices:
+                        continue
+                    choice = choices[0]
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                    delta = choice.get("delta") or {}
+                    piece = delta.get("content")
+                    if isinstance(piece, str):
+                        content_parts.append(piece)
+            content = "".join(content_parts)
+            if not content.strip():
                 # 空内容时 json.loads 的报错是 "Expecting value: char 0"，毫无信息量；
                 # 带上 finish_reason 让用户能区分风控拦截(f content_filter)与截断(length)。
                 raise LLMError(
-                    f"模型返回空内容（finish_reason={choice.get('finish_reason')}）；"
+                    f"模型返回空内容（finish_reason={finish_reason}）；"
                     "多为内容风控或供应商瞬时故障，可重试或更换资料来源"
                 )
             decoded = decode_json_loose(content)

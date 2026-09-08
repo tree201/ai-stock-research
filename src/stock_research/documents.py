@@ -171,8 +171,7 @@ class _VisibleTextParser(HTMLParser):
 def extract_text(fetched: FetchedDocument) -> str:
     """Extract visible text for supported document types.
 
-    PDF bytes are intentionally not guessed or decoded as UTF-8.  Until a
-    real PDF parser is configured, callers receive an explicit error.
+    仅处理 HTML/text；PDF 必须走 extract_text_with_pages（pdftotext）。
     """
 
     if fetched.content_type in {"text/html", "application/xhtml+xml"}:
@@ -182,8 +181,30 @@ def extract_text(fetched: FetchedDocument) -> str:
     if fetched.content_type.startswith("text/"):
         return _normalize_text(fetched.body.decode("utf-8", errors="replace"))
     if fetched.content_type == "application/pdf" or fetched.body.startswith(b"%PDF"):
-        raise UnsupportedDocumentType("PDF parser is not configured yet; retain the raw document for a parser worker")
+        raise UnsupportedDocumentType("PDF 请改用 extract_text_with_pages（pdftotext 抽取）")
     raise UnsupportedDocumentType(f"unsupported document type: {fetched.content_type or '<unknown>'}")
+
+
+def extract_text_with_pages(
+    fetched: FetchedDocument, extractor: PdfTextExtractor | None = None
+) -> tuple[str, tuple[int, ...]]:
+    """Text plus the 1-based line number where each PDF page starts.
+
+    统一抽取入口：PDF 走 pdftotext（Poppler）保留页边界供引用定位；
+    HTML/text 走可见文本抽取，无页边界。调用方：登记资料
+    （document_from_fetched）与 agent 抓取（fetch_filings）。
+    """
+    if fetched.content_type == "application/pdf" or fetched.body.startswith(b"%PDF"):
+        pages = (extractor or PdfTextExtractor()).extract_pages(fetched.body)
+        content_parts: list[str] = []
+        starts: list[int] = []
+        next_line = 1
+        for page in pages:
+            starts.append(next_line)
+            content_parts.append(page.text)
+            next_line += len(page.text.splitlines())
+        return "\n".join(content_parts), tuple(starts)
+    return extract_text(fetched), ()
 
 
 @dataclass(frozen=True, slots=True)

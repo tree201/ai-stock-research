@@ -13,6 +13,7 @@ from stock_research.documents import (
     RawDocument,
     UnsupportedDocumentType,
     extract_text,
+    extract_text_with_pages,
 )
 from stock_research.facts import FinancialFactExtractor
 from stock_research.market_data import MarketDataError, YahooFinanceProvider
@@ -98,6 +99,43 @@ class DataLayerTests(unittest.TestCase):
         )
         with self.assertRaises(UnsupportedDocumentType):
             extract_text(fetched)
+
+    def test_extract_text_with_pages_routes_pdf_and_html(self) -> None:
+        """PDF 走 pdftotext 保留页边界（行号从 1 累计）；HTML 走可见文本无页边界。"""
+        pdf = FetchedDocument(
+            url="https://www1.hkexnews.hk/results.pdf",
+            content_type="application/pdf",
+            body=b"%PDF-1.7 fake",
+            fetched_at=datetime.now(timezone.utc),
+        )
+        runner = lambda _body, _timeout: (0, b"Revenue 100\nProfit 20\fRisk remains", b"")
+        text, page_starts = extract_text_with_pages(pdf, extractor=PdfTextExtractor(runner=runner))
+        self.assertEqual(text, "Revenue 100\nProfit 20\nRisk remains")
+        # 第 1 页占 2 行，第 2 页从第 3 行开始
+        self.assertEqual(page_starts, (1, 3))
+
+        html = FetchedDocument(
+            url="https://ir.example.com/note.html",
+            content_type="text/html",
+            body=b"<html><body><p>Revenue 100</p></body></html>",
+            fetched_at=datetime.now(timezone.utc),
+        )
+        text, page_starts = extract_text_with_pages(html)
+        self.assertEqual(text, "Revenue 100")
+        self.assertEqual(page_starts, ())
+
+    def test_extract_text_with_pages_sniffs_pdf_by_body_header(self) -> None:
+        """content_type 误标（如 application/octet-stream）时按 %PDF 头嗅探。"""
+        fetched = FetchedDocument(
+            url="https://www1.hkexnews.hk/mislabeled.pdf",
+            content_type="application/octet-stream",
+            body=b"%PDF-1.7 mislabeled",
+            fetched_at=datetime.now(timezone.utc),
+        )
+        runner = lambda _body, _timeout: (0, b"page one", b"")
+        text, page_starts = extract_text_with_pages(fetched, extractor=PdfTextExtractor(runner=runner))
+        self.assertEqual(text, "page one")
+        self.assertEqual(page_starts, (1,))
 
     def test_pdf_extractor_preserves_page_numbers_and_chunks(self) -> None:
         runner = lambda _body, _timeout: (0, b"Revenue 100\nCash flow positive\fRisk remains", b"")

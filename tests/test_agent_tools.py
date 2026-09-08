@@ -135,7 +135,7 @@ class ToolTests(unittest.TestCase):
                 return object()
 
         with patch("stock_research.tools.HttpDocumentFetcher", FakeFetcher), \
-             patch("stock_research.tools.extract_text", return_value="公告正文内容"):
+             patch("stock_research.tools.extract_text_with_pages", return_value=("公告正文内容", ())):
             observation = CompanyTools(project).fetch_filings({"url": "https://unknown-host.example.com/a.pdf"})
         self.assertIn("[未验证来源]", observation.text)
         self.assertEqual(observation.citations[0]["trust"], "unverified")
@@ -157,7 +157,7 @@ class ToolTests(unittest.TestCase):
                 return object()
 
         with patch("stock_research.tools.HttpDocumentFetcher", FakeFetcher), \
-             patch("stock_research.tools.extract_text", return_value="中国食品 2024 年度业绩公告\n净利润 25.8 亿港元"):
+             patch("stock_research.tools.extract_text_with_pages", return_value=("中国食品 2024 年度业绩公告\n净利润 25.8 亿港元", ())):
             observation = CompanyTools(project, store=store).fetch_filings(
                 {"url": "https://www1.hkexnews.hk/listedco/listconews/a.pdf", "save": True},
             )
@@ -181,7 +181,7 @@ class ToolTests(unittest.TestCase):
                 return object()
 
         with patch("stock_research.tools.HttpDocumentFetcher", FakeFetcher), \
-             patch("stock_research.tools.extract_text", return_value="正文"):
+             patch("stock_research.tools.extract_text_with_pages", return_value=("正文", ())):
             observation = CompanyTools(project).run("fetch_filings", {"url": "https://a.example.com/x.pdf", "save": True})
         self.assertFalse(observation.ok)
         self.assertIn("无法保存资料", observation.text)
@@ -312,7 +312,6 @@ class ChatIntegrationTests(unittest.TestCase):
                 )
                 with patch("stock_research.service.HttpDocumentFetcher", FakeFetcher), \
                      patch("stock_research.tools.HttpDocumentFetcher", FakeFetcher), \
-                     patch("stock_research.service.extract_text", return_value=fake_text), \
                      patch("stock_research.service.GoogleNewsSearch.search", return_value=[]), \
                      patch("stock_research.service.DuckDuckGoSearch.search", return_value=[]):
                     # 无资料：激活返回 None 且不创建 run、不锁死

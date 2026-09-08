@@ -13,7 +13,7 @@ import json
 from typing import Any
 from urllib.parse import urlparse
 
-from .documents import DocumentFetchError, HttpDocumentFetcher, RawDocument, extract_text
+from .documents import DocumentFetchError, HttpDocumentFetcher, RawDocument, extract_text_with_pages
 from .domain import ResearchProject
 from .market_data import MarketDataError, YahooFinanceProvider
 from .storage import SQLiteStore
@@ -164,8 +164,9 @@ class CompanyTools:
         try:
             # 探索允许任意来源，但必须标注可信度；save=true 时登记为研究资料，
             # 供 collect_filings 收录进已验证语料（引用时保留来源标注）。
+            # PDF（HKEX 公告）走 pdftotext 抽取，保留页边界供引用定位。
             fetched = HttpDocumentFetcher(allowed_hosts=(), allow_any_host=True).fetch(url)
-            text = extract_text(fetched)
+            text, page_starts = extract_text_with_pages(fetched)
         except DocumentFetchError as exc:
             raise ToolError(f"抓取失败：{exc}") from exc
         host = urlparse(url).hostname or ""
@@ -174,10 +175,10 @@ class CompanyTools:
         ref = "F1"
         body = text.strip()[:MAX_OBSERVATION_CHARS]
         citation = {"ref": ref, "title": url, "url": url, "trust": trust}
-        note = self._save_as_document(url, text, trust) if save else ""
+        note = self._save_as_document(url, text, trust, page_starts) if save else ""
         return Observation("fetch_filings", args, f"{tag} {url} 的正文摘录（引用为 [{ref}]）：\n{body}{note}", [citation])
 
-    def _save_as_document(self, url: str, text: str, trust: str) -> str:
+    def _save_as_document(self, url: str, text: str, trust: str, page_starts: tuple[int, ...] = ()) -> str:
         if self.store is None:
             raise ToolError("没有可用的本地存储，无法保存资料")
         host = urlparse(url).hostname or ""
@@ -190,6 +191,7 @@ class CompanyTools:
             content=text,
             source_class=CLASS_PUBLIC,
             trust=trust,
+            page_starts=page_starts,
         )
         self.store.save_document(document)
         # 同步登记为公司来源，下一次研究激活时自动发现该资料。

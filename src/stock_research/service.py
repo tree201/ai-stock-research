@@ -15,7 +15,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 from uuid import UUID, uuid4
 
-from .documents import DocumentFetchError, FetchedDocument, HttpDocumentFetcher, PdfTextExtractor, RawDocument, UnsupportedDocumentType, extract_text
+from .documents import DocumentFetchError, FetchedDocument, HttpDocumentFetcher, RawDocument, UnsupportedDocumentType, extract_text_with_pages
 from .domain import ResearchProject, ResearchSession, RunStatus, SessionMessage, utc_now
 from .agent_core import UnifiedTools, run_agent_turn
 from .tools import CompanyTools
@@ -274,7 +274,6 @@ def research_documents(payload: dict[str, Any], company_id: UUID, as_of_date: da
             allowed_hosts=sorted(whitelist),
             allow_any_host=mode == "full",
         )
-        pdf_extractor = PdfTextExtractor()
         for spec in specs:
             url = spec["url"].strip()
             try:
@@ -312,21 +311,7 @@ def document_from_fetched(
     checker: Any = None,
 ) -> RawDocument | None:
     """Extract text from a fetched URL document and classify its trust."""
-    pdf_extractor = PdfTextExtractor()
-    page_starts: tuple[int, ...] = ()
-    if fetched.content_type == "application/pdf" or fetched.body.startswith(b"%PDF"):
-        pages = pdf_extractor.extract_pages(fetched.body)
-        content_parts: list[str] = []
-        starts: list[int] = []
-        next_line = 1
-        for page in pages:
-            starts.append(next_line)
-            content_parts.append(page.text)
-            next_line += len(page.text.splitlines())
-        content = "\n".join(content_parts)
-        page_starts = tuple(starts)
-    else:
-        content = extract_text(fetched)
+    content, page_starts = extract_text_with_pages(fetched)
     if not content.strip():
         return None
     published_at = parse_published_at(published_at_raw or fetched.last_modified)
@@ -1090,7 +1075,7 @@ def article_payload(url: str) -> dict[str, Any]:
     if "html" not in content_type and (lowered_head.startswith(b"<!doctype") or lowered_head.startswith(b"<html")):
         content_type = "text/html"
     try:
-        text = extract_text(FetchedDocument(final_url, content_type, body, datetime.now(timezone.utc)))
+        text, _ = extract_text_with_pages(FetchedDocument(final_url, content_type, body, datetime.now(timezone.utc)))
     except UnsupportedDocumentType:
         raise ValueError("该链接的内容类型暂不支持站内阅读，请在新标签页打开原文")
     if not text.strip():

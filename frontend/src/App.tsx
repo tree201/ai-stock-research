@@ -98,6 +98,7 @@ type ActivityStep = {
   key: string;
   label: string;
   detail?: string;
+  args?: Record<string, unknown>;
   observation?: string;
   running?: boolean;
 };
@@ -106,43 +107,106 @@ const toolVerb = (tool: string) => TOOL_VERBS[tool] || tool;
 
 const stepFromToolMessage = (message: Message): ActivityStep => {
   const tool = message.content?.tool || "";
+  const args =
+    message.content?.args && typeof message.content.args === "object"
+      ? (message.content.args as Record<string, unknown>)
+      : undefined;
   if (tool === "plan") {
-    const steps = Array.isArray(message.content?.args?.steps)
-      ? (message.content.args.steps as { key?: string; purpose?: string }[])
-      : [];
+    const steps = Array.isArray(args?.steps) ? (args.steps as { key?: string; purpose?: string }[]) : [];
     const chain = steps
       .map((step) => (step.purpose?.trim() || (step.key ? STEP_LABELS[step.key] || step.key : "")))
       .filter(Boolean)
       .join(" → ");
-    return { key: message.id, label: "研究规划", detail: chain, observation: message.content?.observation };
+    return { key: message.id, label: "研究规划", detail: chain, args, observation: message.content?.observation };
   }
   return {
     key: message.id,
     label: `已完成 ${toolVerb(tool)}`,
+    args,
     observation: message.content?.observation,
   };
 };
 
+const argsToText = (args?: Record<string, unknown>) => {
+  if (!args || !Object.keys(args).length) return undefined;
+  try {
+    return JSON.stringify(args, null, 2);
+  } catch {
+    return String(args);
+  }
+};
+
+/** 单条工具步骤：状态图标 + 动作 + 思考摘要，可展开参数/结果面板。 */
+function ActivityStepRow({
+  step,
+  expanded,
+  onToggle,
+}: {
+  step: ActivityStep;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const argsText = argsToText(step.args);
+  const expandable = Boolean(argsText || step.observation);
+  return (
+    <div className={`activity-step${step.running ? " is-running" : ""}${expandable ? " is-expandable" : ""}`}>
+      <button
+        type="button"
+        className="activity-row"
+        onClick={expandable ? onToggle : undefined}
+        disabled={!expandable}
+        aria-expanded={expandable ? expanded : undefined}
+      >
+        <span className="activity-status" aria-hidden>
+          {step.running ? <span className="activity-spinner" /> : <CheckIcon />}
+        </span>
+        <span className="activity-label">{step.label}</span>
+        {step.detail && <span className="activity-detail">{step.detail}</span>}
+        {expandable && <span className={`activity-chevron${expanded ? " is-open" : ""}`} aria-hidden>▾</span>}
+      </button>
+      <div className={`activity-panel${expanded ? " is-open" : ""}`}>
+        <div className="activity-panel-inner">
+          {argsText && (
+            <div className="activity-section">
+              <div className="activity-section-title">参数</div>
+              <pre className="activity-code">{argsText}</pre>
+            </div>
+          )}
+          {step.observation && (
+            <div className="activity-section">
+              <div className="activity-section-title">结果</div>
+              <pre className="activity-code">
+                {step.observation.length > 800 ? `${step.observation.slice(0, 800)}…` : step.observation}
+              </pre>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M13 4.5 6.5 11 3 7.5" />
+    </svg>
+  );
+}
+
+/** 工具调用活动流：历史消息与实时流共用（shadcn Tool / ChatGPT actions 风格）。 */
 function ActivityFlow({ steps }: { steps: ActivityStep[] }) {
   const [expanded, setExpanded] = useState<string | null>(null);
   return (
     <div className="message-row">
       <div className="agent-activity">
         {steps.map((step) => (
-          <div
+          <ActivityStepRow
             key={step.key}
-            className={`activity-step${step.running ? " is-running" : ""}${step.observation ? " has-detail" : ""}`}
-            onClick={step.observation ? () => setExpanded(expanded === step.key ? null : step.key) : undefined}
-          >
-            <span className="activity-dot" aria-hidden />
-            <span className="activity-label">{step.label}</span>
-            {step.detail && <span className="activity-detail">{step.detail}</span>}
-            {expanded === step.key && step.observation && (
-              <div className="activity-observation">
-                {step.observation.length > 600 ? `${step.observation.slice(0, 600)}…` : step.observation}
-              </div>
-            )}
-          </div>
+            step={step}
+            expanded={expanded === step.key}
+            onToggle={() => setExpanded(expanded === step.key ? null : step.key)}
+          />
         ))}
       </div>
     </div>
@@ -1578,6 +1642,7 @@ export default function App() {
                 key: step.ref || step.type,
                 label: step.type === "step_started" ? toolVerb(step.tool || "") : `已完成 ${toolVerb(step.tool || "")}`,
                 detail: step.thought,
+                args: step.args as Record<string, unknown> | undefined,
                 observation: step.observation,
                 running: step.type === "step_started",
               }));

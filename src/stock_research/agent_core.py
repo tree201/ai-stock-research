@@ -244,10 +244,24 @@ def run_agent_turn(
     *,
     max_steps: int = DEFAULT_MAX_STEPS,
     on_step: Callable[[dict[str, Any]], None] | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
 ) -> AgentOutcome:
-    """统一 ReAct 主循环：返回 AgentOutcome（answer + 可选 report/citations）。"""
+    """统一 ReAct 主循环：返回 AgentOutcome（answer + 可选 report/citations）。
+
+    on_event 逐步推送执行进度供 UI 流式显示（step_started / step_completed），
+    推送失败不影响主流程；on_step 保持每步落库语义不变。
+    """
     identity = identity_directive(project.name, project.symbol)
     system = f"{_AGENT_PROTOCOL}\n{identity}"
+
+    def _emit(event: dict[str, Any]) -> None:
+        if on_event is None:
+            return
+        try:
+            on_event(event)
+        except Exception:
+            pass
+
     steps: list[dict[str, Any]] = []
     citations: list[dict[str, str]] = []
     total_budget = max_steps + tools.budget
@@ -271,23 +285,30 @@ def run_agent_turn(
             return _finalize(decision, steps, citations, tools, answer_override=str(decision.get("answer", "")).strip())
         args = decision.get("args")
         args = args if isinstance(args, dict) else {}
+        ref = f"O{len(steps) + 1}"
+        thought = str(decision.get("thought", ""))
+        _emit({"type": "step_started", "ref": ref, "tool": action, "args": args, "thought": thought})
         observation = tools.run(action, args, question)
         # plan 授予额外预算（模型承诺了更长的路径）
         if action == PLAN_TOOL_NAME and observation.ok:
             total_budget = max_steps + tools.budget
-        ref = f"O{len(steps) + 1}"
         step_record = {
             "ref": ref,
             "tool": action,
             "args": args,
             "observation": observation.text,
             "citations": observation.citations,
-            "thought": str(decision.get("thought", "")),
+            "thought": thought,
         }
         steps.append(step_record)
         citations.extend({**citation, "observation": ref} for citation in observation.citations)
         if on_step is not None:
             on_step(step_record)
+        _emit({
+            "type": "step_completed", "ref": ref, "tool": action,
+            "observation": observation.text[:400],
+            "citations": observation.citations,
+        })
     decision = _ask(
         provider,
         system,

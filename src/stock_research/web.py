@@ -186,7 +186,61 @@ class ResearchRequestHandler(BaseHTTPRequestHandler):
         else:
             self._send(404, b"not found", "text/plain; charset=utf-8")
 
+    def _send_event_stream(self, payload: dict, run_chat: Any) -> None:
+        """NDJSON 流式响应：agent 每步推一个事件，结束时推 done/error。
+
+        无 Content-Length + Connection: close，客户端读到连接关闭为止；
+        每个事件立即 flush，前端 fetch reader 逐行解析实时渲染。
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        def emit(event: str, data: Any) -> None:
+            line = json.dumps({"event": event, "data": data}, ensure_ascii=False, default=str)
+            self.wfile.write(line.encode("utf-8") + b"\n")
+            self.wfile.flush()
+
+        def on_event(event_data: dict) -> None:
+            emit("agent_event", event_data)
+
+        try:
+            response = run_chat(on_event)
+            emit("done", response)
+        except Exception as exc:
+            try:
+                emit("error", {"message": str(exc)})
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        finally:
+            self.close_connection = True
+
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+        if self.path.endswith("/messages/stream") or self.path == "/api/chat/stream":
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length > 2_000_000:
+                    raise ValueError("request body is too large")
+                payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                if self.path.endswith("/messages/stream"):
+                    session_id = UUID(self.path.split("/")[3])
+
+                    def run_chat(on_event):
+                        return chat_payload(
+                            session_id, str(payload.get("content", "")),
+                            as_of_date=date.fromisoformat(payload["as_of_date"]) if payload.get("as_of_date") else None,
+                            llm_config=payload.get("llm"), document_urls=payload.get("document_urls"),
+                            on_event=on_event,
+                        )
+                else:
+                    def run_chat(on_event):
+                        return chat_entry_payload(payload, on_event=on_event)
+                self._send_event_stream(payload, run_chat)
+            except Exception as exc:
+                self._send(400, json.dumps({"error": str(exc)}, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8")
+            return
         if self.path not in {"/api/research", "/api/chat", "/api/settings", "/api/settings/display", "/api/projects", "/api/trusted-hosts", "/api/llm/providers", "/api/llm/models", "/api/llm/models/discover", "/api/llm/models/batch", "/api/llm/selection", "/api/llm/approval"} and not self.path.startswith(("/api/projects/", "/api/sessions/", "/api/company-panel", "/api/reports/", "/api/llm/providers/")):
             self._send(404, b'{"error":"not found"}', "application/json")
             return

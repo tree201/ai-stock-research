@@ -158,6 +158,38 @@ class LazyRunTests(unittest.TestCase):
         self.assertIn("没有可用资料", outcome.steps[0]["observation"])
 
 
+class AgentEventStreamTests(unittest.TestCase):
+    """on_event 逐步推送 step_started/step_completed 供 UI 流式显示。"""
+
+    def test_on_event_receives_started_and_completed(self) -> None:
+        workspace = _Workspace()
+        tools = UnifiedTools(None, workspace.activate)
+        provider = ScriptedProvider([
+            {"thought": "先收资料", "action": "collect_filings", "args": {}},
+            {"thought": "回答", "action": "final", "answer": "完成"},
+        ])
+        events: list[dict] = []
+        run_agent_turn(provider, workspace.project, "研究", tools, max_steps=3, on_event=events.append)
+        self.assertEqual([event["type"] for event in events], ["step_started", "step_completed"])
+        self.assertEqual(events[0]["tool"], "collect_filings")
+        self.assertEqual(events[0]["ref"], "O1")
+        self.assertEqual(events[0]["thought"], "先收资料")
+        self.assertIn("observation", events[1])
+
+    def test_on_event_failure_does_not_break_loop(self) -> None:
+        def broken(event: dict) -> None:
+            raise RuntimeError("stream broken")
+
+        workspace = _Workspace()
+        tools = UnifiedTools(None, workspace.activate)
+        provider = ScriptedProvider([
+            {"action": "collect_filings", "args": {}},
+            {"action": "final", "answer": "完成"},
+        ])
+        outcome = run_agent_turn(provider, workspace.project, "研究", tools, max_steps=3, on_event=broken)
+        self.assertEqual(outcome.answer, "完成")
+
+
 class ChatResearchTests(unittest.TestCase):
     """聊天消息直接触发完整研究：报告落库 + report_card。"""
 

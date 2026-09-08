@@ -773,7 +773,7 @@ class ChatResearchWorkspace:
         self.store.save_session(self.session)
 
 
-def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = None, as_of_date: date | None = None, llm_config: dict[str, Any] | None = None, document_urls: Any = None, document_text: Any = None, _save_user_message: bool = True) -> dict[str, Any]:
+def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = None, as_of_date: date | None = None, llm_config: dict[str, Any] | None = None, document_urls: Any = None, document_text: Any = None, _save_user_message: bool = True, on_event: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     """Handle one chat message without exposing workflow internals to the UI.
 
     统一 agent 循环：不再按关键词路由。模型自主决定探索（秒答）或
@@ -831,7 +831,7 @@ def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = No
                 },
             ))
 
-        outcome = run_agent_turn(provider, project, content, tools, on_step=persist_step)
+        outcome = run_agent_turn(provider, project, content, tools, on_step=persist_step, on_event=on_event)
         workspace.finalize(outcome)
         answer = outcome.answer
         # 证据链随回答持久化：引用 + 观察编号，供 grounding 评测使用。
@@ -849,7 +849,7 @@ def chat_payload(session_id: UUID, content: str, db_path: str | Path | None = No
         store.close()
 
 
-def chat_entry_payload(payload: dict[str, Any], db_path: str | Path | None = None) -> dict[str, Any]:
+def chat_entry_payload(payload: dict[str, Any], db_path: str | Path | None = None, on_event: Callable[[dict[str, Any]], None] | None = None) -> dict[str, Any]:
     """Create/reuse a company session for the first chat message."""
     name = str(payload.get("name", "")).strip()
     symbol = str(payload.get("symbol", "")).strip()
@@ -866,7 +866,7 @@ def chat_entry_payload(payload: dict[str, Any], db_path: str | Path | None = Non
         session_id = session.id
     finally:
         store.close()
-    return chat_payload(session_id, content, db_path=db_path, as_of_date=date.fromisoformat(payload["as_of_date"]) if payload.get("as_of_date") else None, llm_config=payload.get("llm"), document_urls=payload.get("document_urls"), document_text=payload.get("document"))
+    return chat_payload(session_id, content, db_path=db_path, as_of_date=date.fromisoformat(payload["as_of_date"]) if payload.get("as_of_date") else None, llm_config=payload.get("llm"), document_urls=payload.get("document_urls"), document_text=payload.get("document"), on_event=on_event)
 
 
 def create_project_with_session(payload: dict[str, Any]) -> dict[str, Any]:

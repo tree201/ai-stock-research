@@ -51,6 +51,7 @@ import {
   Session,
   TrustedHost,
   LlmConfig,
+  AgentStreamEvent,
 } from "./api";
 import { ModelPicker } from "./ModelPicker";
 import { ModelsSection } from "./models/ModelsSection";
@@ -671,6 +672,7 @@ export default function App() {
   const [articleError, setArticleError] = useState("");
   const [pendingJob, setPendingJob] = useState<Job | null>(null);
   const [progressRun, setProgressRun] = useState<Run | undefined>();
+  const [liveSteps, setLiveSteps] = useState<AgentStreamEvent[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -1285,14 +1287,30 @@ export default function App() {
     };
     setMessages((prev) => [...prev, optimistic]);
     try {
+      // 流式端点：agent 每步实时推送 thought/工具调用，前端逐步渲染，不再黑盒等待。
+      const handleAgentEvent = (event: AgentStreamEvent) => {
+        setLiveSteps((prev) => {
+          if (event.type === "step_started") return [...prev, event];
+          const index = prev.findIndex((item) => item.ref === event.ref);
+          if (index === -1) return prev;
+          const next = [...prev];
+          next[index] = event;
+          return next;
+        });
+      };
+      setLiveSteps([]);
       // 模型与强度档位由后端存储的选择决定（llm.selection），前端不再逐请求携带密钥。
       const result = sessionId
-        ? await api.message(sessionId, text)
-        : await api.chat({
-            name: target.name,
-            symbol: target.symbol,
-            content: text,
-          });
+        ? await api.messageStream(sessionId, text, handleAgentEvent)
+        : await api.chatStream(
+            {
+              name: target.name,
+              symbol: target.symbol,
+              content: text,
+            },
+            handleAgentEvent,
+          );
+      setLiveSteps([]);
       if (result.session_id) {
         setSessionId(result.session_id);
         if (!sessionId) setSelectedCompanyKey(`${target.market}:${target.symbol}`);
@@ -1492,7 +1510,26 @@ export default function App() {
                 </div>
               </div>
             )}
-            {busy && !pendingJob && (
+            {liveSteps.map((step) => (
+              <div className="message-row" key={step.ref}>
+                <div
+                  className={`message-tool${step.type === "step_started" ? " is-running" : ""}`}
+                >
+                  <span className="tool-tag">
+                    {step.type === "step_started" ? "执行中" : "完成"}
+                  </span>
+                  {step.thought && <span className="tool-thought">{step.thought}</span>}
+                  {step.type === "step_completed" && step.observation && (
+                    <div className="tool-observation">
+                      {step.observation.length > 160
+                        ? `${step.observation.slice(0, 160)}…`
+                        : step.observation}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+            {busy && !pendingJob && !liveSteps.length && (
               <div className="message-row">
                 <div className="message-bubble typing">
                   <span />

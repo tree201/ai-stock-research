@@ -872,3 +872,43 @@ class DiscoveryTests(unittest.TestCase):
                         "name": "腾讯", "symbol": "00700", "as_of_date": "2025-12-31", "question": "研究公司",
                     }, db_path=f"{directory}/research.sqlite3")
             self.assertIn("自动检索未找到可用资料", str(ctx.exception))
+
+    def test_message_stream_endpoint_emits_ndjson_frames(self) -> None:
+        """流式端点：NDJSON 逐帧响应，最后一帧 done 携带完整聊天结果。"""
+        import json as json_module
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        from stock_research.web import ResearchRequestHandler
+
+        with TemporaryDirectory() as directory, patch.dict(
+            os.environ,
+            {"AI_STOCK_DB": f"{directory}/research.sqlite3"},
+            clear=False,
+        ), patch("stock_research.service.resolve_provider", return_value=HeuristicLLMProvider()):
+            db_path = os.environ["AI_STOCK_DB"]
+            first = chat_entry_payload({"name": "腾讯", "symbol": "00700", "content": "你好"}, db_path=db_path)
+            session_id = first["session_id"]
+
+            server = ThreadingHTTPServer(("127.0.0.1", 0), ResearchRequestHandler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                url = f"http://127.0.0.1:{server.server_address[1]}/api/sessions/{session_id}/messages/stream"
+                request = urllib.request.Request(
+                    url,
+                    data=json_module.dumps({"content": "最新股价"}).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    self.assertEqual(response.headers.get("Content-Type"), "application/x-ndjson; charset=utf-8")
+                    lines = [line for line in response.read().decode("utf-8").splitlines() if line.strip()]
+                frames = [json_module.loads(line) for line in lines]
+                self.assertGreaterEqual(len(frames), 1)
+                self.assertEqual(frames[-1]["event"], "done")
+                self.assertEqual(frames[-1]["data"]["type"], "answer")
+                self.assertTrue(frames[-1]["data"]["message"])
+            finally:
+                server.shutdown()
+                server.server_close()

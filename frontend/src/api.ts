@@ -31,6 +31,8 @@ export const api = {
   session: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),
   chat: (payload: Record<string, unknown>) => request<ChatResult>("/api/chat", { method: "POST", body: JSON.stringify(payload) }),
   message: (id: string, content: string, llm?: ModelSettings) => request<ChatResult>(`/api/sessions/${id}/messages`, { method: "POST", body: JSON.stringify({ content, llm }) }),
+  messageStream: (id: string, content: string, onEvent?: (event: AgentStreamEvent) => void) => streamChat(`/api/sessions/${id}/messages/stream`, { content }, onEvent),
+  chatStream: (payload: Record<string, unknown>, onEvent?: (event: AgentStreamEvent) => void) => streamChat("/api/chat/stream", payload, onEvent),
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
   run: (id: string) => request<{ artifacts: { reports: { id: string }[] } }>(`/api/runs/${id}`),
   report: (id: string) => request<Report>(`/api/reports/${id}`),
@@ -67,6 +69,41 @@ export type ApprovalMode = "manual" | "auto" | "full";
 export const APPROVAL_LABELS: Record<ApprovalMode, string> = { manual: "手动审批", auto: "自动审批", full: "完全访问" };
 
 export type ChatResult = { type: string; session_id: string; message?: string; report?: Report; job_id?: string; run_id?: string; report_id?: string };
+export type AgentStreamEvent = { type: string; ref?: string; tool?: string; args?: Record<string, unknown>; thought?: string; observation?: string };
+
+/** 读 NDJSON 流式响应：每个 agent 步骤实时回调，最终返回 done 帧。 */
+async function streamChat(path: string, body: unknown, onEvent?: (event: AgentStreamEvent) => void): Promise<ChatResult> {
+  const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (!response.ok || !response.body) {
+    const err = await response.json().catch(() => ({}) as { error?: string });
+    throw new Error((err as { error?: string }).error || "请求失败");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let final: ChatResult | null = null;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let frame: { event: string; data: unknown };
+      try {
+        frame = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (frame.event === "agent_event") onEvent?.(frame.data as AgentStreamEvent);
+      else if (frame.event === "done") final = frame.data as ChatResult;
+      else if (frame.event === "error") throw new Error((frame.data as { message?: string })?.message || "处理失败");
+    }
+  }
+  if (!final) throw new Error("连接中断，未收到完整回复");
+  return final;
+}
 export type ModelSettings = { provider: string; base_url: string; model: string; api_key?: string; llm_enabled?: boolean; api_key_configured?: boolean; company_name_display?: NameDisplayPref };
 export type Quote = { available: boolean; symbol: string; delayed: boolean; currency?: string; last?: number; change?: number | null; change_pct?: number | null; high_52w?: number; low_52w?: number; as_of?: string };
 export type PanelSource = { id: string; url: string; title?: string | null; created_at: string; source_class?: string | null };

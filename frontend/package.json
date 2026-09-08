@@ -14,18 +14,22 @@
     "@radix-ui/react-scroll-area": "^1.2.18",
     "@tanstack/react-table": "^8.21.3",
     "antd": "^6.6.2",
+    "clsx": "^2.1.1",
     "echarts": "^6.1.0",
     "lucide-react": "^0.468.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "react-markdown": "^10.1.0",
-    "remark-gfm": "^4.0.1"
+    "remark-gfm": "^4.0.1",
+    "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
     "@vitejs/plugin-react": "^5.0.4",
+    "tailwindcss": "^4.3.3",
     "typescript": "^5.9.2",
     "vite": "^7.1.3"
   }

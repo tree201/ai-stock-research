@@ -1,10 +1,8 @@
 import {
   CSSProperties,
-  FormEvent,
   PointerEvent as ReactPointerEvent,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 import { App as AntdApp, Button, Badge, ConfigProvider, Dropdown, Modal, Segmented, Select, Tabs, theme as antdTheme } from "antd";
@@ -22,7 +20,6 @@ import {
   MessageSquare,
   Palette,
   Server,
-  ArrowUp,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -51,11 +48,20 @@ import {
   Session,
   TrustedHost,
   LlmConfig,
-  AgentStreamEvent,
 } from "./api";
 import { ModelPicker } from "./ModelPicker";
 import { ModelsSection } from "./models/ModelsSection";
 import { DeepSeekOnboardingDialog } from "./models/DeepSeekOnboardingDialog";
+import { STEP_LABELS } from "./assistant/toolMeta";
+import {
+  ResearchRuntimeProvider,
+  type ResearchGateResult,
+  type ResearchSendTarget,
+} from "./assistant/ResearchRuntimeProvider";
+import { Thread } from "./assistant/thread/Thread";
+import { Composer } from "./assistant/thread/Composer";
+import type { ChatResult } from "./api";
+import "./assistant/thread/thread.css";
 
 function relativeTime(value?: string | null): string {
   if (!value) return "";
@@ -80,172 +86,6 @@ const TRUST_BADGES: Record<string, { label: string; className: string }> = {
 function TrustBadge({ trust }: { trust?: string | null }) {
   const badge = TRUST_BADGES[trust || "unverified"] || TRUST_BADGES.unverified;
   return <span className={badge.className}>{badge.label}</span>;
-}
-
-const TOOL_VERBS: Record<string, string> = {
-  collect_filings: "收集公司资料",
-  extract_financials: "抽取财务事实",
-  review: "核对研究证据",
-  compile_report: "编写研究报告",
-  get_quote: "查询行情",
-  search_news: "搜索新闻",
-  fetch_filings: "抓取网页资料",
-  get_financials: "查询财务数据",
-  plan: "制定研究计划",
-};
-
-type ActivityStep = {
-  key: string;
-  label: string;
-  detail?: string;
-  args?: Record<string, unknown>;
-  observation?: string;
-  running?: boolean;
-};
-
-const toolVerb = (tool: string) => TOOL_VERBS[tool] || tool;
-
-const stepFromToolMessage = (message: Message): ActivityStep => {
-  const tool = message.content?.tool || "";
-  const args =
-    message.content?.args && typeof message.content.args === "object"
-      ? (message.content.args as Record<string, unknown>)
-      : undefined;
-  if (tool === "plan") {
-    const steps = Array.isArray(args?.steps) ? (args.steps as { key?: string; purpose?: string }[]) : [];
-    const chain = steps
-      .map((step) => (step.purpose?.trim() || (step.key ? STEP_LABELS[step.key] || step.key : "")))
-      .filter(Boolean)
-      .join(" → ");
-    return { key: message.id, label: "研究规划", detail: chain, args, observation: message.content?.observation };
-  }
-  return {
-    key: message.id,
-    label: `已完成 ${toolVerb(tool)}`,
-    args,
-    observation: message.content?.observation,
-  };
-};
-
-const argsToText = (args?: Record<string, unknown>) => {
-  if (!args || !Object.keys(args).length) return undefined;
-  try {
-    return JSON.stringify(args, null, 2);
-  } catch {
-    return String(args);
-  }
-};
-
-/** 单条工具步骤：状态徽章 + 动作 + 思考摘要，可展开参数/结果面板（对齐 vercel/ai-elements Tool）。 */
-function ActivityStepRow({
-  step,
-  expanded,
-  onToggle,
-}: {
-  step: ActivityStep;
-  expanded: boolean;
-  onToggle: () => void;
-}) {
-  const argsText = argsToText(step.args);
-  const expandable = Boolean(argsText || step.observation);
-  const status = step.running
-    ? { icon: <span className="activity-spinner" />, text: "执行中", cls: "is-state-running" }
-    : { icon: <CheckIcon />, text: "已完成", cls: "is-state-completed" };
-  return (
-    <div className={`activity-step${step.running ? " is-running" : ""}${expandable ? " is-expandable" : ""}`}>
-      <button
-        type="button"
-        className="activity-row"
-        onClick={expandable ? onToggle : undefined}
-        disabled={!expandable}
-        aria-expanded={expandable ? expanded : undefined}
-      >
-        <span className="activity-tool-icon" aria-hidden>
-          <WrenchIcon />
-        </span>
-        <span className="activity-label">{step.label}</span>
-        {step.detail && <span className="activity-detail">{step.detail}</span>}
-        <span className={`activity-badge ${status.cls}`}>
-          {status.icon}
-          {status.text}
-        </span>
-        {expandable && <span className={`activity-chevron${expanded ? " is-open" : ""}`} aria-hidden>▾</span>}
-      </button>
-      <div className={`activity-panel${expanded ? " is-open" : ""}`}>
-        <div className="activity-panel-inner">
-          {argsText && (
-            <div className="activity-section">
-              <div className="activity-section-title">参数</div>
-              <pre className="activity-code">{argsText}</pre>
-            </div>
-          )}
-          {step.observation && (
-            <div className="activity-section">
-              <div className="activity-section-title">结果</div>
-              <pre className={`activity-code${step.observation.startsWith("工具执行失败") ? " is-error" : ""}`}>
-                {step.observation.length > 800 ? `${step.observation.slice(0, 800)}…` : step.observation}
-              </pre>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function WrenchIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
-    </svg>
-  );
-}
-
-function CheckIcon() {
-  return (
-    <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M13 4.5 6.5 11 3 7.5" />
-    </svg>
-  );
-}
-
-/** 工具调用活动流：历史消息与实时流共用（shadcn Tool / ChatGPT actions 风格）。 */
-function ActivityFlow({ steps }: { steps: ActivityStep[] }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-  return (
-    <div className="message-row">
-      <div className="agent-activity">
-        {steps.map((step) => (
-          <ActivityStepRow
-            key={step.key}
-            step={step}
-            expanded={expanded === step.key}
-            onToggle={() => setExpanded(expanded === step.key ? null : step.key)}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function MessageBubble({ message }: { message: Message }) {
-  if (message.message_type === "report_card") return null;
-  const text =
-    message.content?.text || message.content?.summary?.join("\n") || "";
-  return (
-    <div className={`message-row ${message.role === "user" ? "is-user" : ""}`}>
-      <div className="message-bubble">
-        <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
-          components={{
-            a: (props) => <a {...props} target="_blank" rel="noreferrer" />,
-          }}
-        >
-          {text}
-        </ReactMarkdown>
-      </div>
-    </div>
-  );
 }
 
 function AssumptionsForm({
@@ -507,15 +347,6 @@ function ReportCard({
   );
 }
 
-const STEP_LABELS: Record<string, string> = {
-  collect_filings: "获取资料",
-  extract_financials: "抽取财务事实",
-  analyze_business: "分析业务",
-  analyze_risks: "分析风险",
-  calculate_valuation: "计算估值",
-  review: "校验证据",
-  compile_report: "编写报告",
-};
 const activeRun = (runs?: Run[]) =>
   runs?.find(
     (run) => !["completed", "failed", "canceled"].includes(run.status),
@@ -529,19 +360,6 @@ const sessionTitle = (title?: string) => {
     ? "长期研究"
     : value;
 };
-
-function cleanMessages(messages: Message[]) {
-  const seen = new Set<string>();
-  return messages.filter((message) => {
-    if (message.message_type === "report_card") return false;
-    const text =
-      message.content?.text || message.content?.summary?.join("\n") || "";
-    const key = `${message.role}:${text.trim()}`;
-    if (!text.trim() || seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
 
 function ProgressCard({ job, run }: { job: Job; run?: Run }) {
   const steps = run?.steps || [];
@@ -793,9 +611,6 @@ export default function App() {
   const [articleError, setArticleError] = useState("");
   const [pendingJob, setPendingJob] = useState<Job | null>(null);
   const [progressRun, setProgressRun] = useState<Run | undefined>();
-  const [liveSteps, setLiveSteps] = useState<AgentStreamEvent[]>([]);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [newSourceUrl, setNewSourceUrl] = useState("");
   const [newSourceClass, setNewSourceClass] = useState("private");
@@ -812,29 +627,12 @@ export default function App() {
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [namePref, setNamePref] = useState<NameDisplayPref>("zh");
   const [llmConfig, setLlmConfig] = useState<LlmConfig | null>(null);
-  const submittingRef = useRef(false);
   const [newResearchOpen, setNewResearchOpen] = useState(false);
   const [newResearchCompanyKey, setNewResearchCompanyKey] = useState("");
   const [companyCatalog, setCompanyCatalog] = useState<CompanyCatalogEntry[]>([]);
   const [companyCatalogLoading, setCompanyCatalogLoading] = useState(false);
   const [companyCatalogLoaded, setCompanyCatalogLoaded] = useState(false);
   const [newResearchBusy, setNewResearchBusy] = useState(false);
-  const threadScrollRef = useRef<HTMLDivElement>(null);
-  const threadPinnedRef = useRef(true);
-
-  // 用户向上滚动超过阈值时暂停自动跟随，回到底部附近则恢复。
-  function handleThreadScroll(event: React.UIEvent<HTMLDivElement>) {
-    const el = event.currentTarget;
-    threadPinnedRef.current =
-      el.scrollTop + el.clientHeight >= el.scrollHeight - 140;
-  }
-
-  // 消息、进度或会话变化时，若处于跟随状态则滚到底部。
-  useEffect(() => {
-    const el = threadScrollRef.current;
-    if (!el || !threadPinnedRef.current) return;
-    el.scrollTop = el.scrollHeight;
-  }, [messages, pendingJob, progressRun, busy, sessionId]);
 
   useEffect(() => {
     localStorage.setItem("sidebarWidth", String(sidebarWidth));
@@ -1272,9 +1070,8 @@ export default function App() {
       setNewReportBadge(false);
     }
     const detail = await api.session(session.id);
-    threadPinnedRef.current = true;
     setSessionId(detail.session.id);
-    setMessages(cleanMessages(detail.messages));
+    setMessages(detail.messages);
     const activeJob = (detail.jobs || []).find(
       (job) => job.status === "queued" || job.status === "running",
     );
@@ -1322,20 +1119,17 @@ export default function App() {
           }
           if (!stopped) {
             setPendingJob(null);
-            setBusy(false);
             setError("");
           }
         } else if (job.status === "completed") {
           if (!stopped) {
             setError("后台任务已完成，但没有关联研究报告");
             setPendingJob(null);
-            setBusy(false);
           }
         } else if (job.status === "failed" || job.status === "canceled") {
           if (!stopped) {
             setError(job.error?.message || "后台研究任务失败");
             setPendingJob(null);
-            setBusy(false);
           }
         } else if (!stopped) {
           setPendingJob(job);
@@ -1353,123 +1147,69 @@ export default function App() {
     };
   }, [pendingJob?.id]);
 
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    const text = input.trim();
-    if (!text || busy || submittingRef.current) return;
+  // 发送前门禁（原 submit 纯逻辑部分）：模型就绪校验 + 新会话目标推导。
+  const resolveSend = (text: string): ResearchGateResult => {
+    if (!text) return {};
     const modelReady = llmConfig
       ? Boolean(llmConfig.selection && llmConfig.selection.has_api_key)
       : Boolean(modelSettings.api_key_configured || modelSettings.api_key?.trim());
     if (!modelReady) {
-      setError("尚未配置真实模型，请打开‘设置 → 模型接入’选择模型并配置 API Key。");
-      return;
+      return {
+        error: "尚未配置真实模型，请打开‘设置 → 模型接入’选择模型并配置 API Key。",
+      };
     }
     // identity 防串号：无会话时新会话必须跟随当前选中的公司，
     // 不允许兜底到任何硬编码公司（如腾讯示例）。
-    let chatTarget: { name: string; symbol: string; market: string } | null =
-      null;
+    let target: ResearchSendTarget | null = null;
     if (!sessionId) {
       const [market, symbol] = (selectedCompanyKey || "").split(":");
       if (market && symbol) {
-        chatTarget = {
+        target = {
           name: companyName || panelCompany?.name || symbol,
           symbol,
           market,
         };
       } else if (panelCompany) {
-        chatTarget = {
+        target = {
           name: panelCompany.name,
           symbol: panelCompany.symbol,
           market: panelCompany.market,
         };
       }
-      if (!chatTarget) {
-        setError("请先在左侧选择一家公司，再发送消息。");
-        return;
+      if (!target) {
+        return { error: "请先在左侧选择一家公司，再发送消息。" };
       }
     }
-    // 会话为空时上方守卫保证 chatTarget 非空。
-    const target = chatTarget as {
-      name: string;
-      symbol: string;
-      market: string;
-    };
-    submittingRef.current = true;
-    threadPinnedRef.current = true;
-    setInput("");
-    setError("");
-    setBusy(true);
-    const optimistic: Message = {
-      id: crypto.randomUUID(),
-      role: "user",
-      message_type: "text",
-      content: { text },
-      created_at: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, optimistic]);
-    try {
-      // 流式端点：agent 每步实时推送 thought/工具调用，前端逐步渲染，不再黑盒等待。
-      const handleAgentEvent = (event: AgentStreamEvent) => {
-        setLiveSteps((prev) => {
-          if (event.type === "step_started") return [...prev, event];
-          const index = prev.findIndex((item) => item.ref === event.ref);
-          if (index === -1) return prev;
-          const next = [...prev];
-          next[index] = event;
-          return next;
-        });
-      };
-      setLiveSteps([]);
-      // 模型与强度档位由后端存储的选择决定（llm.selection），前端不再逐请求携带密钥。
-      const result = sessionId
-        ? await api.messageStream(sessionId, text, handleAgentEvent)
-        : await api.chatStream(
-            {
-              name: target.name,
-              symbol: target.symbol,
-              content: text,
-            },
-            handleAgentEvent,
-          );
-      setLiveSteps([]);
-      if (result.session_id) {
-        setSessionId(result.session_id);
-        if (!sessionId) setSelectedCompanyKey(`${target.market}:${target.symbol}`);
+    return { target };
+  };
+
+  // done 帧落地（原 submit 的结果处理部分）：会话、徽章、面板、后台任务、公司列表。
+  const handleResult = (
+    result: ChatResult,
+    { isNewSession, target }: { isNewSession: boolean; target: ResearchSendTarget | null },
+  ) => {
+    if (result.session_id) {
+      setSessionId(result.session_id);
+      if (isNewSession && target) {
+        setSelectedCompanyKey(`${target.market}:${target.symbol}`);
       }
-      if (result.message)
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: crypto.randomUUID(),
-            role: "assistant",
-            message_type: "text",
-            content: { text: result.message },
-            created_at: new Date().toISOString(),
-          },
-        ]);
-      if (result.report) {
-        setNewReportBadge(true);
-        if (panelCompany) void loadPanel(panelCompany);
-      }
-      if (result.type === "research_queued" && result.job_id) {
-        setPendingJob({
-          id: result.job_id,
-          session_id: result.session_id,
-          status: "queued",
-          attempts: 0,
-        });
-        setProgressRun(undefined);
-        setError("");
-      }
-      await refreshCompanies();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "处理失败");
-    } finally {
-      setInput((current) => (current.trim() === text ? "" : current));
-      submittingRef.current = false;
-      setBusy(false);
     }
-  }
+    if (result.report) {
+      setNewReportBadge(true);
+      if (panelCompany) void loadPanel(panelCompany);
+    }
+    if (result.type === "research_queued" && result.job_id) {
+      setPendingJob({
+        id: result.job_id,
+        session_id: result.session_id,
+        status: "queued",
+        attempts: 0,
+      });
+      setProgressRun(undefined);
+      setError("");
+    }
+    void refreshCompanies();
+  };
 
   return (
     <ConfigProvider
@@ -1590,61 +1330,15 @@ export default function App() {
             </button>
           </div>
         </header>
-        <div
-          className="thread-scroll"
-          ref={threadScrollRef}
-          onScroll={handleThreadScroll}
+        <ResearchRuntimeProvider
+          sessionId={sessionId}
+          history={messages}
+          disabled={!!pendingJob}
+          resolveSend={resolveSend}
+          onResult={handleResult}
+          onError={setError}
         >
-          <section className="thread">
-            {!messages.length && (
-              <div className="empty-state">
-                <div className="empty-icon">
-                  <Sparkles />
-                </div>
-                <h2>今天想研究哪家公司？</h2>
-                <p>
-                  直接输入研究问题。研究结果、证据和报告会沉淀在公司的会话中。
-                </p>
-                <div className="suggestions">
-                  <button
-                    onClick={() =>
-                      setInput("研究这家公司是否适合长期持有，重点看现金流和估值")
-                    }
-                  >
-                    研究长期持有价值
-                  </button>
-                  <button
-                    onClick={() => setInput("分析公司的主要风险和反方证据")}
-                  >
-                    寻找风险和反方
-                  </button>
-                </div>
-              </div>
-            )}
-            {(() => {
-              // 连续的 tool 消息聚合进同一活动流容器（ChatGPT/Claude 风格），
-              // 不再每个步骤一个独立气泡。
-              const rendered: React.ReactNode[] = [];
-              let toolBuffer: Message[] = [];
-              const flushTools = () => {
-                if (toolBuffer.length) {
-                  rendered.push(
-                    <ActivityFlow key={`activity-${toolBuffer[0].id}`} steps={toolBuffer.map(stepFromToolMessage)} />,
-                  );
-                  toolBuffer = [];
-                }
-              };
-              for (const message of messages) {
-                if (message.message_type === "tool") {
-                  toolBuffer.push(message);
-                  continue;
-                }
-                flushTools();
-                rendered.push(<MessageBubble key={message.id} message={message} />);
-              }
-              flushTools();
-              return rendered;
-            })()}
+          <Thread>
             {pendingJob && (
               <div className="message-row">
                 <div className="message-bubble report-bubble">
@@ -1652,85 +1346,48 @@ export default function App() {
                 </div>
               </div>
             )}
-            {(() => {
-              const liveActivity: ActivityStep[] = liveSteps.map((step) => ({
-                key: step.ref || step.type,
-                label: step.type === "step_started" ? toolVerb(step.tool || "") : `已完成 ${toolVerb(step.tool || "")}`,
-                detail: step.thought,
-                args: step.args as Record<string, unknown> | undefined,
-                observation: step.observation,
-                running: step.type === "step_started",
-              }));
-              return liveActivity.length ? <ActivityFlow steps={liveActivity} /> : null;
-            })()}
-            {busy && !pendingJob && !liveSteps.length && (
-              <div className="message-row">
-                <div className="message-bubble typing">
-                  <span />
-                  <span />
-                  <span />
-                </div>
+          </Thread>
+          <div
+            className={`composer-wrap ${panelOpen ? "panel-open" : ""}`}
+          >
+            {error && (
+              <div className="error-bar">
+                {error}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (/风控|Content Exists Risk|资料|来源|白名单|登记|review failed|财务事实/.test(error)) {
+                      // 资料类/内容风控/review 未过错误引导到「公司详情 → 资料」（换资料来源），
+                      // 模型配置错误才进设置。
+                      setPanelTab("sources");
+                      setPanelOpen(true);
+                    } else {
+                      openSettings();
+                    }
+                  }}
+                >
+                  {/风控|Content Exists Risk|资料|来源|白名单|登记|review failed|财务事实/.test(error) ? "打开公司资料" : "打开模型设置"}
+                </button>
               </div>
             )}
-          </section>
-        </div>
-        <div
-          className={`composer-wrap ${panelOpen ? "panel-open" : ""}`}
-        >
-          {error && (
-            <div className="error-bar">
-              {error}
-              <button
-                type="button"
-                onClick={() => {
-                  if (/风控|Content Exists Risk|资料|来源|白名单|登记|review failed|财务事实/.test(error)) {
-                    // 资料类/内容风控/review 未过错误引导到「公司详情 → 资料」（换资料来源），
-                    // 模型配置错误才进设置。
-                    setPanelTab("sources");
-                    setPanelOpen(true);
-                  } else {
-                    openSettings();
-                  }
-                }}
-              >
-                {/风控|Content Exists Risk|资料|来源|白名单|登记|review failed|财务事实/.test(error) ? "打开公司资料" : "打开模型设置"}
-              </button>
-            </div>
-          )}
-          <form className="composer" onSubmit={submit}>
-            <textarea
-              value={input}
-              disabled={busy || !!pendingJob}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  submit(e);
-                }
-              }}
-              placeholder="输入研究问题或追问……"
-              rows={1}
-            />
-            <div className="composer-bar">
-              <ApprovalPicker config={llmConfig} onConfigChange={setLlmConfig} />
-              <div className="composer-bar-right">
+            <Composer
+              left={
+                <ApprovalPicker
+                  config={llmConfig}
+                  onConfigChange={setLlmConfig}
+                />
+              }
+              right={
                 <ModelPicker
                   config={llmConfig}
                   onConfigChange={setLlmConfig}
                   onOpenSettings={openSettings}
                 />
-                <button
-                  type="submit"
-                  className="send"
-                  disabled={busy || !!pendingJob || !input.trim()}
-                  aria-label="发送"
-                >
-                  <ArrowUp size={16} />
-                </button>
-              </div>
-            </div>
-          </form>
-        </div>
+              }
+              placeholder="输入研究问题或追问……"
+            />
+          </div>
+        </ResearchRuntimeProvider>
       </main>
       {panelOpen && (
         <>

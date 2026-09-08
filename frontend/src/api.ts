@@ -31,8 +31,8 @@ export const api = {
   session: (id: string) => request<SessionDetail>(`/api/sessions/${id}`),
   chat: (payload: Record<string, unknown>) => request<ChatResult>("/api/chat", { method: "POST", body: JSON.stringify(payload) }),
   message: (id: string, content: string, llm?: ModelSettings) => request<ChatResult>(`/api/sessions/${id}/messages`, { method: "POST", body: JSON.stringify({ content, llm }) }),
-  messageStream: (id: string, content: string, onEvent?: (event: AgentStreamEvent) => void) => streamChat(`/api/sessions/${id}/messages/stream`, { content }, onEvent),
-  chatStream: (payload: Record<string, unknown>, onEvent?: (event: AgentStreamEvent) => void) => streamChat("/api/chat/stream", payload, onEvent),
+  messageStream: (id: string, content: string, onEvent?: (event: AgentStreamEvent) => void, signal?: AbortSignal) => streamChat(`/api/sessions/${id}/messages/stream`, { content }, onEvent, signal),
+  chatStream: (payload: Record<string, unknown>, onEvent?: (event: AgentStreamEvent) => void, signal?: AbortSignal) => streamChat("/api/chat/stream", payload, onEvent, signal),
   job: (id: string) => request<Job>(`/api/jobs/${id}`),
   run: (id: string) => request<{ artifacts: { reports: { id: string }[] } }>(`/api/runs/${id}`),
   report: (id: string) => request<Report>(`/api/reports/${id}`),
@@ -71,9 +71,9 @@ export const APPROVAL_LABELS: Record<ApprovalMode, string> = { manual: "手动�
 export type ChatResult = { type: string; session_id: string; message?: string; report?: Report; job_id?: string; run_id?: string; report_id?: string };
 export type AgentStreamEvent = { type: string; ref?: string; tool?: string; args?: Record<string, unknown>; thought?: string; observation?: string };
 
-/** 读 NDJSON 流式响应：每个 agent 步骤实时回调，最终返回 done 帧。 */
-async function streamChat(path: string, body: unknown, onEvent?: (event: AgentStreamEvent) => void): Promise<ChatResult> {
-  const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+/** 读 NDJSON 流式响应：每个 agent 步骤实时回调，最终返回 done 帧；signal 用于中断（reader 中止时抛 AbortError）。 */
+async function streamChat(path: string, body: unknown, onEvent?: (event: AgentStreamEvent) => void, signal?: AbortSignal): Promise<ChatResult> {
+  const response = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
   if (!response.ok || !response.body) {
     const err = await response.json().catch(() => ({}) as { error?: string });
     throw new Error((err as { error?: string }).error || "请求失败");

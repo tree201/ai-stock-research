@@ -19,6 +19,8 @@
 from __future__ import annotations
 
 import json
+import random
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from uuid import UUID
@@ -30,6 +32,13 @@ from .tools import CompanyTools, Observation, render_tool_catalog
 DEFAULT_MAX_STEPS = 24
 PLAN_STEP_BONUS = 12
 PLAN_TOOL_NAME = "plan"
+
+# prompt 中保留观测原文的最近步数（对齐 Anthropic clear_tool_uses 默认值）；
+# 更早步骤只留一行「调用记录 + 目的」，需要时模型重新调用工具。
+KEEP_RECENT_OBSERVATIONS = 3
+# 单条观测截断阈值：DeepSeek 网关实测 ~65KB 请求会直接断连（无 HTTP 响应），
+# 单次超大工具返回同样会引爆，故对最新观测也设兜底。
+MAX_OBSERVATION_CHARS = 16_000
 
 EXPLORATION_TOOLS: tuple[str, ...] = ("query_report", "search_news", "get_quote", "fetch_filings")
 RESEARCH_TOOLS: tuple[str, ...] = (
@@ -197,6 +206,35 @@ _AGENT_PROTOCOL = (
 )
 
 
+def _compact_transcript(steps: list[dict[str, Any]]) -> str:
+    """拼 prompt 的探索记录压缩：最近 N 步保留观测原文，更早的只留一行目的。
+
+    观测原文是 prompt 的 token 大头，且信号寿命只有一轮（下一步决策看过
+    就不再需要；报告引用走 steps 存储的全文）。全量携带会把 prompt 滚过
+    供应商网关的断连阈值（DeepSeek 实测 ~65KB 必挂）。调用记录与目的必须
+    留档，否则模型不知道查过什么，会重复调用或凭空编造已有结论。
+    """
+    if not steps:
+        return ""
+    keep_from = max(0, len(steps) - KEEP_RECENT_OBSERVATIONS)
+    lines: list[str] = []
+    for index, step in enumerate(steps):
+        header = f"[{step['ref']}] 工具 {step['tool']}，参数 {json.dumps(step['args'], ensure_ascii=False)}"
+        thought = str(step.get("thought", "")).strip()
+        if index < keep_from:
+            purpose = f"，目的：{thought}" if thought else ""
+            lines.append(f"{header}{purpose}（结果已丢弃，需要时重新调用工具）")
+            continue
+        observation = str(step.get("observation", ""))
+        if len(observation) > MAX_OBSERVATION_CHARS:
+            observation = (
+                observation[:MAX_OBSERVATION_CHARS]
+                + f"\n…（观测过长已截断，丢弃 {len(observation) - MAX_OBSERVATION_CHARS} 字符；需要完整数据请重新调用工具）"
+            )
+        lines.append(f"{header}：\n{observation}")
+    return "\n\n".join(lines)
+
+
 def run_agent_turn(
     provider: Any,
     project: ResearchProject,
@@ -209,11 +247,13 @@ def run_agent_turn(
     """统一 ReAct 主循环：返回 AgentOutcome（answer + 可选 report/citations）。"""
     identity = identity_directive(project.name, project.symbol)
     system = f"{_AGENT_PROTOCOL}\n{identity}"
-    transcript = ""
     steps: list[dict[str, Any]] = []
     citations: list[dict[str, str]] = []
     total_budget = max_steps + tools.budget
     while len(steps) < total_budget:
+        # 每轮从 steps 重新拼装（而非累积字符串）：历史观测按预算折叠，
+        # prompt 大小有上界，长探索不再滚爆供应商网关。
+        transcript = _compact_transcript(steps)
         user = (
             f"可用工具：\n{tools.catalog()}\n\n"
             f"用户问题：{question}\n\n"
@@ -245,30 +285,46 @@ def run_agent_turn(
         }
         steps.append(step_record)
         citations.extend({**citation, "observation": ref} for citation in observation.citations)
-        transcript += f"[{ref}] 工具 {action}，参数 {json.dumps(args, ensure_ascii=False)}：\n{observation.text}\n\n"
         if on_step is not None:
             on_step(step_record)
     decision = _ask(
         provider,
         system,
-        f"可用工具：\n{tools.catalog()}\n\n用户问题：{question}\n\n已完成的探索：\n{transcript}\n请立即给出最终回答。",
+        f"可用工具：\n{tools.catalog()}\n\n用户问题：{question}\n\n已完成的探索：\n{_compact_transcript(steps)}\n请立即给出最终回答。",
     )
     return _finalize(decision, steps, citations, tools, answer_override=str(decision.get("answer", "")).strip())
 
 
-def _ask(provider: Any, system: str, user: str, attempts: int = 3) -> dict[str, Any]:
-    """带重试的决策调用：供应商瞬时空响应/网络抖动不应炸掉整轮对话。
+_RETRY_BASE_SECONDS = 0.5
+_RETRY_MAX_SECONDS = 30.0
 
+
+def _backoff_delay(attempt: int, retry_after: float | None) -> float:
+    """指数退避 + 随机抖动；服务端 Retry-After 建议优先（封顶防死等）。"""
+    if retry_after is not None:
+        return min(retry_after, _RETRY_MAX_SECONDS)
+    return min(_RETRY_BASE_SECONDS * 2**attempt, _RETRY_MAX_SECONDS) * random.uniform(1.0, 1.25)
+
+
+def _ask(provider: Any, system: str, user: str, attempts: int = 3) -> dict[str, Any]:
+    """带指数退避的决策调用（对齐 OpenAI/Anthropic SDK 默认重试策略）。
+
+    瞬态错误（429 限流/5xx/网络瞬断）按指数退避重试，429 遵循服务端
+    Retry-After；确定性错误（鉴权/参数/内容风控等）重试无意义，立即失败。
     每轮决策是无状态单轮调用（transcript 全量随 prompt 重发），重试幂等。
     """
     last: Exception | None = None
-    for _ in range(attempts):
+    for attempt in range(attempts):
         try:
             decision = provider.chat_json(system, user)
             return decision if isinstance(decision, dict) else {}
         except LLMError as exc:
             last = exc
-    raise LLMError(f"agent 循环连续 {attempts} 次调用模型失败：{last}")
+            if not getattr(exc, "retryable", True):
+                break
+            if attempt + 1 < attempts:
+                time.sleep(_backoff_delay(attempt, getattr(exc, "retry_after", None)))
+    raise LLMError(f"agent 循环连续 {attempt + 1} 次调用模型失败：{last}")
 
 
 def _finalize(

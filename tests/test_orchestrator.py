@@ -11,11 +11,18 @@ from datetime import date
 import unittest
 from typing import Any
 from unittest import TestCase
+from unittest.mock import patch
 from uuid import uuid4
 
-from stock_research.agent_core import UnifiedTools, run_agent_turn
+from stock_research.agent_core import (
+    MAX_OBSERVATION_CHARS,
+    UnifiedTools,
+    _ask,
+    _compact_transcript,
+    run_agent_turn,
+)
 from stock_research.documents import RawDocument
-from stock_research.llm import HeuristicLLMProvider
+from stock_research.llm import HeuristicLLMProvider, LLMError
 from stock_research.orchestrator import (
     HeuristicOrchestratorProvider,
     ResearchTools,
@@ -60,6 +67,55 @@ def _tools_with_documents(workflow: ResearchWorkflow, run_id) -> ResearchTools:
     )
     tools.documents = [_document(project.company_id)]
     return tools
+
+
+class TranscriptCompactionTests(TestCase):
+    """prompt 压缩：旧观测折叠为一行目的，最近 N 步保留原文；单条超长兜底截断。"""
+
+    @staticmethod
+    def _steps(count: int) -> list[dict[str, Any]]:
+        return [
+            {
+                "ref": f"O{i}",
+                "tool": f"tool{i}",
+                "args": {"k": i},
+                "observation": f"原文{i}",
+                "citations": [],
+                "thought": f"目的{i}",
+            }
+            for i in range(1, count + 1)
+        ]
+
+    def test_empty_steps_yield_empty_transcript(self) -> None:
+        self.assertEqual(_compact_transcript([]), "")
+
+    def test_older_observations_folded_into_purpose_lines(self) -> None:
+        transcript = _compact_transcript(self._steps(5))
+        # 最近 3 步保留观测原文
+        self.assertIn("原文3", transcript)
+        self.assertIn("原文5", transcript)
+        # 更早步骤只留调用记录 + 目的，原文不再进入 prompt
+        self.assertNotIn("原文1", transcript)
+        self.assertNotIn("原文2", transcript)
+        self.assertIn("工具 tool1", transcript)
+        self.assertIn("目的1", transcript)
+        self.assertIn("结果已丢弃，需要时重新调用工具", transcript)
+
+    def test_oversized_latest_observation_truncated(self) -> None:
+        steps = [
+            {
+                "ref": "O1",
+                "tool": "t",
+                "args": {},
+                "observation": "x" * (MAX_OBSERVATION_CHARS + 500),
+                "citations": [],
+                "thought": "",
+            }
+        ]
+        transcript = _compact_transcript(steps)
+        self.assertIn("观测过长已截断", transcript)
+        # 截断后总长有上界：不会因单条超大观测滚爆供应商网关
+        self.assertLess(len(transcript), MAX_OBSERVATION_CHARS + 300)
 
 
 class ScriptedOrchestratorTests(TestCase):
@@ -241,8 +297,58 @@ class LLMOutageResilienceTests(TestCase):
                 return super().chat_json(system, user)
 
         tools = _tools_with_documents(self.workflow, self.run.id)
-        outcome = _run_research(FlakyOrchestrator(), self.project, "研究长实", tools)
+        with patch("stock_research.agent_core.time.sleep"):
+            outcome = _run_research(FlakyOrchestrator(), self.project, "研究长实", tools)
         self.assertIsNotNone(outcome["report"], "瞬时失败重试后研究应正常完成")
+
+
+class AskRetryBackoffTests(TestCase):
+    """_ask 退避策略：瞬态错误指数退避、429 遵循 Retry-After、确定性错误立即失败。"""
+
+    class _FlakyProvider:
+        def __init__(self, script: list[Any]) -> None:
+            self.script = list(script)
+            self.calls = 0
+
+        def chat_json(self, system: str, user: str) -> dict[str, Any]:
+            self.calls += 1
+            item = self.script[min(self.calls - 1, len(self.script) - 1)]
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    def test_transient_error_backs_off_with_increasing_delay(self) -> None:
+        provider = self._FlakyProvider([
+            LLMError("瞬态故障一"),
+            LLMError("瞬态故障二"),
+            {"action": "final", "answer": "ok"},
+        ])
+        with patch("stock_research.agent_core.time.sleep") as sleeper, patch(
+            "stock_research.agent_core.random.uniform", return_value=1.0
+        ):
+            decision = _ask(provider, "s", "u")
+        self.assertEqual(decision["answer"], "ok")
+        delays = [call.args[0] for call in sleeper.call_args_list]
+        self.assertEqual(len(delays), 2, "两次失败之间都应退避")
+        self.assertLess(delays[0], delays[1], "指数退避应递增")
+
+    def test_rate_limit_honors_retry_after(self) -> None:
+        provider = self._FlakyProvider([
+            LLMError("429 overloaded", retryable=True, retry_after=7.0),
+            {"action": "final", "answer": "ok"},
+        ])
+        with patch("stock_research.agent_core.time.sleep") as sleeper:
+            _ask(provider, "s", "u")
+        self.assertEqual(sleeper.call_args.args[0], 7.0, "应按服务端 Retry-After 建议等待")
+
+    def test_deterministic_error_fails_without_retry(self) -> None:
+        provider = self._FlakyProvider([LLMError("Content Exists Risk", retryable=False)])
+        with patch("stock_research.agent_core.time.sleep") as sleeper:
+            with self.assertRaises(LLMError) as ctx:
+                _ask(provider, "s", "u")
+        self.assertEqual(provider.calls, 1, "确定性错误不应重试")
+        self.assertIn("连续 1 次", str(ctx.exception))
+        sleeper.assert_not_called()
 
 
 class _Scripted:

@@ -12,6 +12,7 @@ import json
 import os
 import time
 from typing import Any, Callable, Iterable, Protocol
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
@@ -29,7 +30,39 @@ def decode_json_loose(content: Any) -> Any:
 
 
 class LLMError(RuntimeError):
-    """Raised when a provider cannot return a valid structured response."""
+    """Raised when a provider cannot return a valid structured response.
+
+    retryable 标记该错误是否为供应商瞬态故障（429/5xx/网络瞬断）——调用方
+    （agent 循环）据此决定退避重试还是立即失败；retry_after 是服务端通过
+    Retry-After 头建议的等待秒数。
+    """
+
+    def __init__(self, message: str, *, retryable: bool = True, retry_after: float | None = None) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.retry_after = retry_after
+
+
+def retry_policy(exc: Exception) -> tuple[bool, float | None]:
+    """供应商错误分类：(是否瞬态可重试, 服务端建议等待秒数)。
+
+    对齐 OpenAI/Anthropic SDK 默认策略：429 限流与 5xx 退避重试，
+    429 优先遵循 Retry-After 头；其余 4xx（鉴权/参数/内容风控）重试
+    无意义，立即失败。RemoteDisconnected/ConnectionReset 这类服务端
+    掐线不回话的错误按瞬态处理。
+    """
+    if isinstance(exc, HTTPError):
+        if exc.code == 429:
+            raw = exc.headers.get("Retry-After") if exc.headers else None
+            try:
+                seconds = float(raw) if raw else None
+            except (TypeError, ValueError):
+                seconds = None
+            return True, seconds
+        return 500 <= exc.code < 600, None
+    if isinstance(exc, (URLError, TimeoutError, ConnectionError)):
+        return True, None
+    return False, None
 
 
 def http_error_detail(exc: Exception) -> str:
@@ -322,7 +355,10 @@ class OpenAICompatibleProvider:
         except LLMError:
             raise
         except Exception as exc:
-            raise LLMError(f"LLM chat_json failed: {http_error_detail(exc)}") from exc
+            retryable, retry_after = retry_policy(exc)
+            raise LLMError(
+                f"LLM chat_json failed: {http_error_detail(exc)}", retryable=retryable, retry_after=retry_after
+            ) from exc
 
     @staticmethod
     def _parse_claim(raw: dict[str, Any], evidence: Iterable[dict[str, str]]) -> AnalysisClaim:

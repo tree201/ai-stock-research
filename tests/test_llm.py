@@ -4,7 +4,16 @@ import json
 import unittest
 import urllib.error
 
-from stock_research.llm import AnalysisRequest, DeepSeekProvider, HeuristicLLMProvider, LLMError, OpenAICompatibleProvider
+from http.client import RemoteDisconnected
+
+from stock_research.llm import (
+    AnalysisRequest,
+    DeepSeekProvider,
+    HeuristicLLMProvider,
+    LLMError,
+    OpenAICompatibleProvider,
+    retry_policy,
+)
 
 
 class _Response:
@@ -83,7 +92,53 @@ class LLMTests(unittest.TestCase):
             provider.chat_json("system", "user")
         self.assertIn("finish_reason=content_filter", str(ctx.exception))
 
+    def test_chat_json_surfaces_transient_disconnect_as_retryable(self) -> None:
+        """服务端掐线不回话（RemoteDisconnected）按瞬态可重试透出。"""
+        provider = OpenAICompatibleProvider(
+            "https://example.test/v1", "key", "model",
+            opener=lambda *_a, **_k: (_ for _ in ()).throw(RemoteDisconnected("remote end closed")),
+        )
+        with self.assertRaises(LLMError) as ctx:
+            provider.chat_json("system", "user")
+        self.assertTrue(ctx.exception.retryable)
+        self.assertIn("remote end closed", str(ctx.exception))
+
+    def test_chat_json_marks_content_block_as_non_retryable(self) -> None:
+        """400 内容风控重试无意义：retryable=False 让 agent 循环立即失败。"""
+        provider = OpenAICompatibleProvider(
+            "https://example.test/v1", "key", "model",
+            opener=_HttpErrorResponse(400, {"error": {"message": "Content Exists Risk"}}),
+        )
+        with self.assertRaises(LLMError) as ctx:
+            provider.chat_json("system", "user")
+        self.assertFalse(ctx.exception.retryable)
+
     def test_openai_compatible_provider_answers_follow_up(self) -> None:
         payload = {"choices": [{"message": {"content": "报告显示净利润率约为 20%。"}}]}
         provider = OpenAICompatibleProvider("https://example.test/v1", "key", "model", opener=lambda *_args, **_kwargs: _Response(payload))
         self.assertEqual(provider.answer("利润率怎么看？", "净利润率：20%"), "报告显示净利润率约为 20%。")
+
+
+class RetryPolicyTests(unittest.TestCase):
+    """供应商错误分类：429/5xx/网络瞬断可重试，其余 4xx 确定性失败。"""
+
+    def test_429_is_retryable_and_honors_retry_after_header(self) -> None:
+        exc = urllib.error.HTTPError("https://x", 429, "Too Many Requests", {"Retry-After": "7"}, None)
+        self.assertEqual(retry_policy(exc), (True, 7.0))
+
+    def test_429_without_retry_after_still_retryable(self) -> None:
+        exc = urllib.error.HTTPError("https://x", 429, "Too Many Requests", {}, None)
+        self.assertEqual(retry_policy(exc), (True, None))
+
+    def test_5xx_is_retryable(self) -> None:
+        exc = urllib.error.HTTPError("https://x", 503, "Service Unavailable", {}, None)
+        self.assertEqual(retry_policy(exc), (True, None))
+
+    def test_other_4xx_is_deterministic(self) -> None:
+        exc = urllib.error.HTTPError("https://x", 401, "Unauthorized", {}, None)
+        self.assertEqual(retry_policy(exc), (False, None))
+
+    def test_connection_and_timeout_errors_are_transient(self) -> None:
+        self.assertEqual(retry_policy(ConnectionResetError()), (True, None))
+        self.assertEqual(retry_policy(RemoteDisconnected("closed")), (True, None))
+        self.assertEqual(retry_policy(TimeoutError()), (True, None))

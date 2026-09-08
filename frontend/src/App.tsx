@@ -82,33 +82,75 @@ function TrustBadge({ trust }: { trust?: string | null }) {
   return <span className={badge.className}>{badge.label}</span>;
 }
 
-function ToolMessage({ message }: { message: Message }) {
-  const { tool, args } = message.content;
+const TOOL_VERBS: Record<string, string> = {
+  collect_filings: "收集公司资料",
+  extract_financials: "抽取财务事实",
+  review: "核对研究证据",
+  compile_report: "编写研究报告",
+  get_quote: "查询行情",
+  search_news: "搜索新闻",
+  fetch_filings: "抓取网页资料",
+  get_financials: "查询财务数据",
+  plan: "制定研究计划",
+};
+
+type ActivityStep = {
+  key: string;
+  label: string;
+  detail?: string;
+  observation?: string;
+  running?: boolean;
+};
+
+const toolVerb = (tool: string) => TOOL_VERBS[tool] || tool;
+
+const stepFromToolMessage = (message: Message): ActivityStep => {
+  const tool = message.content?.tool || "";
   if (tool === "plan") {
-    const steps = Array.isArray(args?.steps) ? (args.steps as { key?: string; purpose?: string }[]) : [];
+    const steps = Array.isArray(message.content?.args?.steps)
+      ? (message.content.args.steps as { key?: string; purpose?: string }[])
+      : [];
     const chain = steps
       .map((step) => (step.purpose?.trim() || (step.key ? STEP_LABELS[step.key] || step.key : "")))
       .filter(Boolean)
       .join(" → ");
-    return (
-      <div className="message-row">
-        <div className="message-tool is-plan">
-          <span className="tool-tag">研究规划</span>
-          <span>{chain || message.content.text}</span>
-        </div>
-      </div>
-    );
+    return { key: message.id, label: "研究规划", detail: chain, observation: message.content?.observation };
   }
+  return {
+    key: message.id,
+    label: `已完成 ${toolVerb(tool)}`,
+    observation: message.content?.observation,
+  };
+};
+
+function ActivityFlow({ steps }: { steps: ActivityStep[] }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
   return (
     <div className="message-row">
-      <div className="message-tool">{message.content.text}</div>
+      <div className="agent-activity">
+        {steps.map((step) => (
+          <div
+            key={step.key}
+            className={`activity-step${step.running ? " is-running" : ""}${step.observation ? " has-detail" : ""}`}
+            onClick={step.observation ? () => setExpanded(expanded === step.key ? null : step.key) : undefined}
+          >
+            <span className="activity-dot" aria-hidden />
+            <span className="activity-label">{step.label}</span>
+            {step.detail && <span className="activity-detail">{step.detail}</span>}
+            {expanded === step.key && step.observation && (
+              <div className="activity-observation">
+                {step.observation.length > 600 ? `${step.observation.slice(0, 600)}…` : step.observation}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
 
 function MessageBubble({ message }: { message: Message }) {
   if (message.message_type === "report_card") return null;
-  if (message.message_type === "tool") return <ToolMessage message={message} />;
   const text =
     message.content?.text || message.content?.summary?.join("\n") || "";
   return (
@@ -1500,9 +1542,30 @@ export default function App() {
                 </div>
               </div>
             )}
-            {messages.map((message) => (
-              <MessageBubble key={message.id} message={message} />
-            ))}
+            {(() => {
+              // 连续的 tool 消息聚合进同一活动流容器（ChatGPT/Claude 风格），
+              // 不再每个步骤一个独立气泡。
+              const rendered: React.ReactNode[] = [];
+              let toolBuffer: Message[] = [];
+              const flushTools = () => {
+                if (toolBuffer.length) {
+                  rendered.push(
+                    <ActivityFlow key={`activity-${toolBuffer[0].id}`} steps={toolBuffer.map(stepFromToolMessage)} />,
+                  );
+                  toolBuffer = [];
+                }
+              };
+              for (const message of messages) {
+                if (message.message_type === "tool") {
+                  toolBuffer.push(message);
+                  continue;
+                }
+                flushTools();
+                rendered.push(<MessageBubble key={message.id} message={message} />);
+              }
+              flushTools();
+              return rendered;
+            })()}
             {pendingJob && (
               <div className="message-row">
                 <div className="message-bubble report-bubble">
@@ -1510,25 +1573,16 @@ export default function App() {
                 </div>
               </div>
             )}
-            {liveSteps.map((step) => (
-              <div className="message-row" key={step.ref}>
-                <div
-                  className={`message-tool${step.type === "step_started" ? " is-running" : ""}`}
-                >
-                  <span className="tool-tag">
-                    {step.type === "step_started" ? "执行中" : "完成"}
-                  </span>
-                  {step.thought && <span className="tool-thought">{step.thought}</span>}
-                  {step.type === "step_completed" && step.observation && (
-                    <div className="tool-observation">
-                      {step.observation.length > 160
-                        ? `${step.observation.slice(0, 160)}…`
-                        : step.observation}
-                    </div>
-                  )}
-                </div>
-              </div>
-            ))}
+            {(() => {
+              const liveActivity: ActivityStep[] = liveSteps.map((step) => ({
+                key: step.ref || step.type,
+                label: step.type === "step_started" ? toolVerb(step.tool || "") : `已完成 ${toolVerb(step.tool || "")}`,
+                detail: step.thought,
+                observation: step.observation,
+                running: step.type === "step_started",
+              }));
+              return liveActivity.length ? <ActivityFlow steps={liveActivity} /> : null;
+            })()}
             {busy && !pendingJob && !liveSteps.length && (
               <div className="message-row">
                 <div className="message-bubble typing">

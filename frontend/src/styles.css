@@ -158,13 +158,18 @@ body { background:var(--paper); color:var(--ink); }
 .suggestions button:hover { border-color:#9acbbb; background:var(--signal-soft); color:#176b59; transform:translateY(-1px); }
 .message-row { margin-bottom:28px; }
 .message-bubble { color:var(--ink-body); font-size:14px; line-height:1.75; }
-.message-tool { display:flex; flex-wrap:wrap; align-items:center; gap:8px; max-width:78%; font-size:12.5px; color:var(--ink-muted); background:var(--surface-dim); border:1px solid var(--line); border-radius:10px; padding:7px 12px; }
-.message-tool .tool-tag { flex:none; font-size:11px; font-weight:600; color:var(--signal); background:var(--signal-soft); border-radius:6px; padding:2px 8px; }
-.message-tool.is-running { border-style:dashed; opacity:.85; }
-.message-tool.is-running .tool-tag { animation:tool-pulse 1.2s ease-in-out infinite; }
-.message-tool .tool-thought { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.message-tool .tool-observation { flex-basis:100%; max-height:88px; overflow:hidden; font-size:12px; color:var(--ink-faint); white-space:pre-wrap; word-break:break-word; }
-@keyframes tool-pulse { 0%,100% { opacity:1; } 50% { opacity:.45; } }
+.agent-activity { display:flex; flex-direction:column; gap:2px; width:100%; max-width:78%; border-left:2px solid var(--line); padding:4px 0 4px 14px; margin:8px 0; }
+.activity-step { position:relative; display:flex; align-items:baseline; gap:8px; min-height:24px; font-size:12.5px; color:var(--ink-faint); }
+.activity-step.has-detail { cursor:pointer; }
+.activity-step.has-detail:hover .activity-label { color:var(--ink); }
+.activity-dot { flex:none; width:5px; height:5px; border-radius:50%; background:var(--ink-faint); align-self:center; }
+.activity-step.is-running { color:var(--ink-muted); }
+.activity-step.is-running .activity-dot { width:10px; height:10px; border-radius:50%; background:transparent; border:2px solid var(--signal); border-top-color:transparent; animation:activity-spin .8s linear infinite; }
+.activity-label { flex:none; font-weight:500; color:var(--ink-muted); }
+.activity-step.is-running .activity-label { color:var(--ink); }
+.activity-detail { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; }
+.activity-observation { flex-basis:100%; max-height:140px; overflow:auto; margin-top:4px; font-size:12px; line-height:1.55; color:var(--ink-faint); background:var(--surface-dim); border-radius:8px; padding:8px 10px; white-space:pre-wrap; word-break:break-word; }
+@keyframes activity-spin { to { transform:rotate(360deg); } }
 .message-row.is-user .message-bubble { background:var(--bubble-user); color:var(--ink); border:1px solid var(--bubble-user-line); border-radius:14px 14px 4px 14px; padding:11px 16px; }
 .composer-wrap { left: var(--sidebar-width, 276px); padding:22px 32px 18px; background:linear-gradient(transparent,var(--paper) 28%); }
 .composer-wrap.panel-open { right: var(--panel-width, 380px); }

@@ -118,7 +118,9 @@ export function ResearchRuntimeProvider({
     if (!text) return;
 
     const gate = resolveSend(text);
-    if (gate.error || !gate.target) {
+    // 已有会话时 resolveSend 不推导 target（messageStream 无需公司目标），
+    // 仅在无会话时才要求 target；否则会话内追问会被误判为门禁失败。
+    if (gate.error || (!sessionIdRef.current && !gate.target)) {
       // 门禁失败：文本已被 composer 消费，回填草稿避免用户重打。
       composerRef.current?.setText(text);
       onError(gate.error || "请先在左侧选择一家公司，再发送消息。");
@@ -149,7 +151,7 @@ export function ResearchRuntimeProvider({
     abortRef.current = controller;
     const startSessionId = sessionIdRef.current;
     runSessionRef.current = startSessionId;
-    const target = gate.target;
+    const target = gate.target ?? null;
 
     const updateDraft = (update: (parts: DraftPart[]) => DraftPart[]) => {
       setThreadMessages((prev) =>
@@ -208,7 +210,8 @@ export function ResearchRuntimeProvider({
       const result = startSessionId
         ? await api.messageStream(startSessionId, text, handleAgentEvent, controller.signal)
         : await api.chatStream(
-            { name: target.name, symbol: target.symbol, content: text },
+            // 走此分支时必然无会话，门禁已保证 target 存在。
+            { name: target!.name, symbol: target!.symbol, content: text },
             handleAgentEvent,
             controller.signal,
           );

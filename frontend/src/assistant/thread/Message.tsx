@@ -15,6 +15,9 @@ function AssistantMessage() {
   return (
     <MessagePrimitive.Root className="message-aui py-2">
       <MessagePrimitive.Parts
+        // 默认 unstable_showEmptyOnNonTextEnd=true：末尾是非文本 part（纯工具消息）
+        // 也会渲染 Empty 回退（三点动画），导致已完成的工具流永远挂着"正在思考"。
+        unstable_showEmptyOnNonTextEnd={false}
         components={{
           Text: ({ text }) => <MarkdownText text={text} />,
           Reasoning: ({ text }) => <Reasoning text={text} />,

@@ -27,7 +27,7 @@ export function ToolCard({ toolName, args, result, isError, status }: ToolCallMe
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[var(--ink)] hover:bg-[var(--surface-soft)] rounded-[10px] transition-colors"
+        className="flex w-full items-center gap-2 px-3 py-2 text-left bg-transparent text-[var(--ink)] hover:bg-[var(--surface-soft)] rounded-[10px] transition-colors"
       >
         {running ? (
           <Loader2 size={13} className="shrink-0 animate-spin text-[var(--signal)]" />
@@ -85,7 +85,7 @@ export function Reasoning({ text }: { text: string }) {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[var(--ink-muted)] hover:text-[var(--ink-soft)] rounded-[10px] transition-colors"
+        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left bg-transparent text-[var(--ink-muted)] hover:text-[var(--ink-soft)] rounded-[10px] transition-colors"
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         <span>思考过程</span>

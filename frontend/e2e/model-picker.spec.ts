@@ -41,11 +41,13 @@ test("model picker drills into model and effort panes", async ({ page }) => {
 
 test("model without reasoning levels omits the effort row", async ({ page }) => {
   await page.request.post("/api/llm/providers", { data: { id: 1, name: "DeepSeek", base_url: "https://api.deepseek.com/v1", api_key: "sk-e2e" } });
+  // Kimi 系模型为固定模式（无 thinking_levels），用于验证「推理等级」行的省略
+  await page.request.post("/api/llm/providers", { data: { id: 2, name: "Kimi（月之暗面）", base_url: "https://api.moonshot.cn/v1", api_key: "sk-e2e" } });
   await page.goto("/");
   await page.locator(".model-picker .picker-trigger").click();
   await page.locator(".picker-cell", { hasText: "模型" }).click();
-  await page.locator(".picker-option", { hasText: "DeepSeek-V3（对话）" }).click();
-  await expect(page.locator(".model-picker .picker-trigger")).toContainText("DeepSeek-V3");
+  await page.locator(".picker-option", { hasText: "Kimi-K2" }).click();
+  await expect(page.locator(".model-picker .picker-trigger")).toContainText("Kimi-K2");
   // 固定模式模型：root 面板不显示「推理等级」行，触发器无档位后缀
   await page.locator(".model-picker .picker-trigger").click();
   await expect(page.locator(".picker-cell", { hasText: "推理等级" })).toHaveCount(0);

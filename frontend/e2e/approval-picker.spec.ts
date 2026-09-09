@@ -10,9 +10,9 @@ import { dismissOnboarding } from "./support/onboarding";
 test("approval pill sits bottom-left, model pill bottom-right of composer", async ({ page }) => {
   await page.goto("/");
   await dismissOnboarding(page);
-  const approval = page.locator(".composer .approval-trigger");
-  const model = page.locator(".composer .model-picker .picker-trigger");
-  const send = page.locator(".composer .send");
+  const approval = page.locator(".aui-composer .approval-trigger");
+  const model = page.locator(".aui-composer .model-picker .picker-trigger");
+  const send = page.locator(".aui-composer .aui-send-btn");
   await expect(approval).toBeVisible();
   await expect(model).toBeVisible();
   await expect(send).toBeVisible();
@@ -33,13 +33,13 @@ test("approval pill sits bottom-left, model pill bottom-right of composer", asyn
   // 切换到完全访问 → 触发器更新为警示色态并持久化
   await page.locator(".approval-menu .picker-option", { hasText: "完全访问" }).click();
   await expect(approval).toContainText("完全访问");
-  await expect(page.locator(".composer .approval-trigger.approval-full")).toHaveCount(1);
+  await expect(page.locator(".aui-composer .approval-trigger.approval-full")).toHaveCount(1);
 
   await page.reload();
-  await expect(page.locator(".composer .approval-trigger")).toContainText("完全访问");
+  await expect(page.locator(".aui-composer .approval-trigger")).toContainText("完全访问");
 
   // 切回手动审批
-  await page.locator(".composer .approval-trigger").click();
+  await page.locator(".aui-composer .approval-trigger").click();
   await page.locator(".approval-menu .picker-option", { hasText: "手动审批" }).click();
-  await expect(page.locator(".composer .approval-trigger")).toContainText("手动审批");
+  await expect(page.locator(".aui-composer .approval-trigger")).toContainText("手动审批");
 });

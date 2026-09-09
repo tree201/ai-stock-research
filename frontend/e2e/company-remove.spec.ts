@@ -19,7 +19,9 @@ test("company row menu removes company after confirm", async ({ page }) => {
   // 显示偏好默认中文名优先：00005 会被 HKEX 目录解析为「汇丰控股」
   await expect(sidebar).toContainText("汇丰控股");
 
-  await page.locator(".company-more").first().click();
+  // 共享 scratch 库里可能有其他测试遗留的公司，必须按 aria-label 精确定位本行的 ⋯ 菜单
+  // （exact 必需：外层 .company-main 容器按钮的 accessible name 也包含该子串）
+  await page.getByRole("button", { name: "更多选项：汇丰控股", exact: true }).click();
   await page.getByText("移除该公司", { exact: true }).click();
   const confirm = page.locator(".ant-modal-confirm");
   await expect(confirm).toBeVisible();

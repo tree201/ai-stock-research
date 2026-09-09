@@ -7,7 +7,7 @@ import { test, expect } from "@playwright/test";
  * palette can evolve without breaking the suite.
  */
 
-const REGIONS = [".sidebar", ".topbar", ".main-shell", ".composer"];
+const REGIONS = [".sidebar", ".topbar", ".main-shell", ".aui-composer"];
 
 async function luminance(rgb: string): Promise<number> {
   const parts = rgb.match(/\d+/g);
@@ -55,7 +55,7 @@ for (const theme of ["light", "dark"] as const) {
     // Composer input text follows too.
     const composerTextLuma = await luminance(
       await page
-        .locator(".composer textarea")
+        .locator(".aui-composer textarea")
         .evaluate((el) => getComputedStyle(el).color),
     );
     if (theme === "light") expect(composerTextLuma).toBeLessThan(128);

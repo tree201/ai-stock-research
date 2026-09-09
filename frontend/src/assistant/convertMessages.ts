@@ -25,7 +25,7 @@ export function messagesToThread(messages: Message[]): ThreadMessageLike[] {
   const result: ThreadMessageLike[] = [];
   for (const message of messages) {
     if (message.message_type === "report_card") continue;
-    if (message.role === "tool") {
+    if (message.message_type === "tool") {
       const part = toolCallPart(message);
       const last = result[result.length - 1];
       if (

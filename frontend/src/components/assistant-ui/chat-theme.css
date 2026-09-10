@@ -1,0 +1,103 @@
+/* ===== 聊天区主题：assistant-ui 官方组件 + shadcn 变量映射现有设计令牌 =====
+ * 替代旧 assistant/thread/thread.css。作用域 .aui-chat（挂在 App 聊天区根容器）。
+ * 设计令牌（--paper/--surface/--ink…）由 theme.ts 的 applyTheme 写在 <html> inline style，
+ * 亮暗切换即时生效，因此这里只需 :root 一套 shadcn 变量定义。
+ */
+
+/* 1. 先声明层序：防止后写的 @layer base 反压 utilities（CSS 允许 layer 语句先于 @import） */
+@layer theme, base, components, utilities;
+
+/* 2. Tailwind v4 按需引入（无 preflight，避免影响全局 antd/自研样式） */
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities);
+
+/* 3. 动画类（unlayered）：官方组件的 animate-in/fade-in/slide-in/collapsible-* 与 shimmer */
+@import "tw-animate-css";
+@import "tw-shimmer";
+
+/* 4. dark: 变体绑定项目主题机制（html[data-theme=dark]，非 .dark 类） */
+@custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
+
+/* 官方 reasoning/tool-fallback 组件的状态变体（Radix data-state 驱动的开合动画） */
+@custom-variant data-open (&:where([data-state="open"], [data-open]:not([data-open="false"])));
+@custom-variant data-closed (&:where([data-state="closed"], [data-closed]:not([data-closed="false"])));
+
+/* 5. shadcn 变量 → 现有令牌（挂 :root：官方组件直接引用 var(--color-*) 中间变量） */
+:root {
+  --background: var(--paper);
+  --foreground: var(--ink-body);
+  --card: var(--surface);
+  --card-foreground: var(--ink-strong);
+  --popover: var(--surface);
+  --popover-foreground: var(--ink-strong);
+  --primary: var(--signal);
+  --primary-foreground: #ffffff;
+  --secondary: var(--surface-dim);
+  --secondary-foreground: var(--ink-soft);
+  --muted: var(--surface-dim);
+  --muted-foreground: var(--ink-muted);
+  --accent: var(--surface-dim);
+  --accent-foreground: var(--ink);
+  --destructive: var(--danger);
+  --border: var(--line);
+  --input: var(--line);
+  --ring: var(--signal);
+  --radius: 0.75rem;
+}
+
+/* 6. Tailwind v4 color 工具类映射（bg-background/text-foreground/border-border…）
+ *    不用 @theme inline：官方组件的 inline style 直接引用 var(--color-card) 等中间变量，
+ *    inline 模式不输出变量会解析失败；非 inline 输出变量 + 工具类走 var() 间接。 */
+@theme {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* 7. 聊天作用域 mini-reset（无 preflight 的必需补偿；:where() 0 特异性 + base 层，
+ *    不压任何工具类；styles.css 未分层规则（error-bar/picker 等）优先级天然更高） */
+@layer base {
+  :where(.aui-chat *, .aui-chat *::before, .aui-chat *::after) {
+    box-sizing: border-box;
+    border: 0 solid; /* 关键：border-border 等工具类只设宽度，无 preflight 时需要默认 solid */
+    margin: 0;
+    padding: 0;
+  }
+  :where(.aui-chat button, .aui-chat textarea, .aui-chat input) {
+    font: inherit;
+    color: inherit; /* textarea 颜色跟随主题（e2e 亮度断言点） */
+    background-color: transparent;
+  }
+}
+
+/* 8. 聊天区布局锚点（main-shell flex 列内的填充与滚动约束） */
+.aui-chat {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* pendingJob 禁用态视觉 */
+.aui-chat textarea:disabled {
+  opacity: 0.6;
+}

@@ -58,10 +58,9 @@ import {
   type ResearchGateResult,
   type ResearchSendTarget,
 } from "./assistant/ResearchRuntimeProvider";
-import { Thread } from "./assistant/thread/Thread";
-import { Composer } from "./assistant/thread/Composer";
+import { Thread } from "@/components/assistant-ui/elements/thread.aui";
 import type { ChatResult } from "./api";
-import "./assistant/thread/thread.css";
+import "@/components/assistant-ui/chat-theme.css";
 
 function relativeTime(value?: string | null): string {
   if (!value) return "";
@@ -470,37 +469,38 @@ function CompanyTree({
               >
                 <span className="company-title">
                   <strong>{company.name}</strong>
-                  <Dropdown
-                    trigger={["click"]}
-                    overlayClassName="company-more-dropdown"
-                    menu={{
-                      items: [
-                        {
-                          key: "remove",
-                          label: "移除该公司",
-                          danger: true,
-                          icon: <Trash2 size={13} />,
-                          // 弹层默认挂在触发节点父级（company-main 内部），
-                          // 菜单点击若不阻断会冒泡到行按钮误触 openCompany
-                          onClick: ({ domEvent }) => {
-                            domEvent.stopPropagation();
-                            onRemoveCompany(company);
-                          },
-                        },
-                      ],
-                    }}
-                  >
-                    <button
-                      className="company-more"
-                      title="更多选项"
-                      aria-label={`更多选项：${company.name}`}
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <MoreHorizontal size={13} />
-                    </button>
-                  </Dropdown>
                 </span>
               </button>
+              {/* 「更多」按钮放在 company-main 之外：button 不能嵌套 button */}
+              <Dropdown
+                trigger={["click"]}
+                classNames={{ root: "company-more-dropdown" }}
+                menu={{
+                  items: [
+                    {
+                      key: "remove",
+                      label: "移除该公司",
+                      danger: true,
+                      icon: <Trash2 size={13} />,
+                      // 弹层默认挂在触发节点父级（company-node），
+                      // 菜单点击需阻断冒泡以免误触行按钮 openCompany
+                      onClick: ({ domEvent }) => {
+                        domEvent.stopPropagation();
+                        onRemoveCompany(company);
+                      },
+                    },
+                  ],
+                }}
+              >
+                <button
+                  className="company-more"
+                  title="更多选项"
+                  aria-label={`更多选项：${company.name}`}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <MoreHorizontal size={13} />
+                </button>
+              </Dropdown>
             </div>
             {expanded && (
               <div className="session-tree">
@@ -1338,54 +1338,52 @@ export default function App() {
           onResult={handleResult}
           onError={setError}
         >
-          <Thread>
-            {pendingJob && (
-              <div className="message-row">
-                <div className="message-bubble report-bubble">
-                  <ProgressCard job={pendingJob} run={progressRun} />
-                </div>
-              </div>
-            )}
-          </Thread>
-          <div
-            className={`composer-wrap ${panelOpen ? "panel-open" : ""}`}
-          >
-            {error && (
-              <div className="error-bar">
-                {error}
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (/风控|Content Exists Risk|资料|来源|白名单|登记|review failed|财务事实/.test(error)) {
-                      // 资料类/内容风控/review 未过错误引导到「公司详情 → 资料」（换资料来源），
-                      // 模型配置错误才进设置。
-                      setPanelTab("sources");
-                      setPanelOpen(true);
-                    } else {
-                      openSettings();
-                    }
-                  }}
-                >
-                  {/风控|Content Exists Risk|资料|来源|白名单|登记|review failed|财务事实/.test(error) ? "打开公司资料" : "打开模型设置"}
-                </button>
-              </div>
-            )}
-            <Composer
-              left={
+          <div className="aui-chat">
+            <Thread
+              composerLeft={
                 <ApprovalPicker
                   config={llmConfig}
                   onConfigChange={setLlmConfig}
                 />
               }
-              right={
+              composerRight={
                 <ModelPicker
                   config={llmConfig}
                   onConfigChange={setLlmConfig}
                   onOpenSettings={openSettings}
                 />
               }
-              placeholder="输入研究问题或追问……"
-            />
+              footerTop={
+                error ? (
+                  <div className="error-bar">
+                    {error}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (/风控|Content Exists Risk|资料|来源|白名单|登记|review failed|财务事实/.test(error)) {
+                          // 资料类/内容风控/review 未过错误引导到「公司详情 → 资料」（换资料来源），
+                          // 模型配置错误才进设置。
+                          setPanelTab("sources");
+                          setPanelOpen(true);
+                        } else {
+                          openSettings();
+                        }
+                      }}
+                    >
+                      {/风控|Content Exists Risk|资料|来源|白名单|登记|review failed|财务事实/.test(error) ? "打开公司资料" : "打开模型设置"}
+                    </button>
+                  </div>
+                ) : null
+              }
+            >
+              {pendingJob && (
+                <div className="message-row">
+                  <div className="message-bubble report-bubble">
+                    <ProgressCard job={pendingJob} run={progressRun} />
+                  </div>
+                </div>
+              )}
+            </Thread>
           </div>
         </ResearchRuntimeProvider>
       </main>
